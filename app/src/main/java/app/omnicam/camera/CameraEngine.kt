@@ -743,7 +743,20 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     recording = null
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
                     ui.update { it.copy(recording = false, paused = false, recordedMs = 0) }
-                    if (ev.hasError()) toast("Recording stopped (code ${ev.error})")
+                    if (ev.hasError()) {
+                        val reason = when (ev.error) {
+                            VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE -> "storage full"
+                            VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE -> "camera stopped"
+                            VideoRecordEvent.Finalize.ERROR_INVALID_OUTPUT_OPTIONS -> "could not create the video file"
+                            VideoRecordEvent.Finalize.ERROR_ENCODING_FAILED -> "encoder failed; try a lower resolution"
+                            VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA -> "recording too short"
+                            else -> "error"
+                        }
+                        toast("Recording stopped: $reason (code ${ev.error})")
+                        // Rekaman gagal tetap bisa menyisakan file kosong di galeri
+                        runCatching { ev.outputResults.outputUri.takeIf { it != android.net.Uri.EMPTY }
+                            ?.let { app.contentResolver.delete(it, null, null) } }
+                    }
                     else ui.update { it.copy(lastUri = ev.outputResults.outputUri) }
                 }
                 else -> {}
