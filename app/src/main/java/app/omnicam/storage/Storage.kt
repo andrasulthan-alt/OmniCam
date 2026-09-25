@@ -111,6 +111,53 @@ object MediaOutput {
     }
 
     /**
+     * Writes an already-encoded JPEG (e.g. a merged HDR photo) to DCIM/OmniCam.
+     * Only orientation, capture time and (if enabled) GPS are written; no device identifiers.
+     */
+    fun saveJpeg(
+        ctx: Context,
+        bytes: ByteArray,
+        stamp: String,
+        suffix: String,
+        rotationDegrees: Int,
+        location: Location?,
+    ): Uri? {
+        val cr = ctx.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "IMG_${stamp}_$suffix.jpg")
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, DIR)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = cr.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        return try {
+            cr.openOutputStream(uri)?.use { it.write(bytes) } ?: error("cannot open output")
+            cr.openFileDescriptor(uri, "rw")?.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                val orientation = when (((rotationDegrees % 360) + 360) % 360) {
+                    90 -> ExifInterface.ORIENTATION_ROTATE_90
+                    180 -> ExifInterface.ORIENTATION_ROTATE_180
+                    270 -> ExifInterface.ORIENTATION_ROTATE_270
+                    else -> ExifInterface.ORIENTATION_NORMAL
+                }
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, orientation.toString())
+                val now = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
+                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, now)
+                exif.setAttribute(ExifInterface.TAG_DATETIME, now)
+                if (location != null) exif.setGpsInfo(location)
+                exif.saveAttributes()
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            cr.update(uri, values, null, null)
+            uri
+        } catch (_: Exception) {
+            runCatching { cr.delete(uri, null, null) }
+            null
+        }
+    }
+
+    /**
      * Hapus lokasi GPS dan identitas perangkat dari JPEG biasa.
      * Tidak dijalankan untuk Ultra HDR (menulis ulang EXIF berisiko merusak gain map/MPF).
      */
