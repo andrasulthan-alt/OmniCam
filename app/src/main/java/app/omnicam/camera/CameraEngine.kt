@@ -5,6 +5,8 @@ package app.omnicam.camera
 
 import android.Manifest
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -33,6 +35,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.ZoomState
@@ -43,6 +46,7 @@ import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.HighSpeedVideoSessionConfig
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
@@ -63,6 +67,7 @@ import app.omnicam.model.PhotoFormat
 import app.omnicam.model.QrHit
 import app.omnicam.model.Readout
 import app.omnicam.model.ScopeSettings
+import app.omnicam.model.SlowMoUi
 import app.omnicam.storage.MediaOutput
 import app.omnicam.storage.Prefs
 import kotlinx.coroutines.CoroutineScope
@@ -75,13 +80,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Satu-satunya pemilik sesi kamera.
@@ -165,6 +174,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0,
                 expNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L,
                 focusDiopter = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: 0f,
+                aperture = result.get(CaptureResult.LENS_APERTURE) ?: 0f,
             )
         }
     }
@@ -325,6 +335,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             }
             val info = p.getCameraInfo(selector)
 
+            val slowMoOk = runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
+            if (s.mode == Mode.SLOWMO) {
+                if (slowMoOk && bindSlowMo(p, o, v, selector, info)) return true
+                toast("Slow motion is not supported by this camera")
+                ui.update { it.copy(mode = Mode.VIDEO, slowMoOk = false) }
+                return tryBind(p, o, v, withAnalysis)
+            }
+
             val ratio = if (s.mode == Mode.VIDEO) {
                 AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
             } else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
@@ -338,20 +356,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val usePreviewStab = s.video.stab && previewStabOk
             val useVideoStab = s.video.stab && !previewStabOk && videoStabOk
 
-            // 4K recording: keep the viewfinder stream small (720p). On some devices/ROMs a large preview
-            // stream next to a 4K recording stream shows smeared/torn rows in the viewfinder,
-            // while the recorded file is fine. A smaller preview lowers the load on the camera pipeline.
-            val videoRange = if (s.video.hdr) DynamicRange.HLG_10_BIT else DynamicRange.SDR
-            val plannedQuality = videoCaps?.let { c ->
-                val qs = c.getSupportedQualities(videoRange).ifEmpty { c.getSupportedQualities(DynamicRange.SDR) }
-                s.video.quality?.takeIf { it in qs } ?: qs.firstOrNull()
-            }
-            val previewSelector = ResolutionSelector.Builder().setAspectRatioStrategy(ratio).apply {
-                if (plannedQuality == Quality.UHD) setResolutionStrategy(
-                    ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
-                )
-            }.build()
-            val previewBuilder = Preview.Builder().setResolutionSelector(previewSelector)
+            val previewBuilder = Preview.Builder()
+                .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
             if (!extActive) Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCb)
             if (usePreviewStab) previewBuilder.setPreviewStabilizationEnabled(true)
 
@@ -423,6 +429,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 }
 
                 Mode.QR -> cases += buildAnalysis(qrAnalyzer, Size(1280, 960))
+                Mode.SLOWMO -> {} // bound separately in bindSlowMo()
             }
 
             p.unbindAll()
@@ -436,13 +443,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     formats = newFormats, format = newFormat, video = newVideo,
                     ranges = ranges, hasFlash = cam.cameraInfo.hasFlashUnit(),
                     qr = if (s.mode == Mode.QR) it.qr else null,
+                    slowMoOk = slowMoOk,
                 )
             }
             scopeAnalyzer.histogram = s.scope.histogram
             scopeAnalyzer.zebra = s.scope.zebra
             scopeAnalyzer.peaking = s.scope.peaking
             // Senter menyala terus hanya di VIDEO/QR; di FOTO/PRO memakai flash mode
-            cam.cameraControl.enableTorch(s.torch && (s.mode == Mode.VIDEO || s.mode == Mode.QR))
+            cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
             applyManual()
             probeExtensions()
             return true
@@ -455,6 +463,47 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
+    }
+
+    /**
+     * High-speed session (e.g. 120/240 fps on the Galaxy S9 main camera). With slow motion enabled,
+     * CameraX encodes the file at 30 fps, so it plays back 4x/8x slower. No audio in this mode.
+     */
+    private fun bindSlowMo(
+        p: ProcessCameraProvider, o: LifecycleOwner, v: PreviewView, selector: CameraSelector,
+        info: androidx.camera.core.CameraInfo,
+    ): Boolean {
+        val s = ui.value
+        val hs = Recorder.getHighSpeedVideoCapabilities(info) ?: return false
+        val qualities = hs.getSupportedQualities(DynamicRange.SDR)
+        val q: Quality? = s.slowMo.quality?.takeIf { it in qualities } ?: qualities.firstOrNull()
+        val recorder = Recorder.Builder().apply {
+            if (q != null) setQualitySelector(QualitySelector.from(q))
+        }.build()
+        val vc = VideoCapture.Builder(recorder).setTargetRotation(rotation).build()
+        val preview = Preview.Builder().build().also { it.setSurfaceProvider(v.surfaceProvider) }
+
+        val supported = info.getSupportedFrameRateRanges(HighSpeedVideoSessionConfig(vc, preview))
+        val rates = supported.map { it.upper }.filter { it >= 120 }.distinct().sorted()
+        val fps = s.slowMo.fps.takeIf { it in rates } ?: rates.lastOrNull() ?: return false
+        val range = supported.filter { it.upper == fps }.maxByOrNull { it.lower } ?: Range(fps, fps)
+        val config = HighSpeedVideoSessionConfig(vc, preview, range, true)
+
+        imageCapture = null
+        videoCapture = vc
+        p.unbindAll()
+        val cam = p.bindToLifecycle(o, selector, config)
+        camera = cam
+        observeZoom(cam)
+        ui.update {
+            it.copy(
+                slowMo = SlowMoUi(qualities = qualities, quality = q, rates = rates, fps = fps),
+                slowMoOk = true, ranges = readRanges(cam), hasFlash = cam.cameraInfo.hasFlashUnit(), qr = null,
+            )
+        }
+        scopeFrame.value = null
+        cam.cameraControl.enableTorch(s.torch)
+        return true
     }
 
     private fun buildAnalysis(analyzer: ImageAnalysis.Analyzer, size: Size): ImageAnalysis =
@@ -489,6 +538,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val minFocus = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         val caps = c.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         val awb = c.getCameraCharacteristic(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
+        val ois = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
+        val apertures = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
+            ?.toList()?.distinct()?.sorted() ?: emptyList()
         val es = cam.cameraInfo.exposureState
         return ManualRanges(
             manualSensor = iso != null && exp != null &&
@@ -504,6 +557,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             evStep = es.exposureCompensationStep.toFloat(),
             evSupported = es.isExposureCompensationSupported,
             awbModes = awb.toList(),
+            apertures = apertures,
+            ois = ois,
         )
     }
 
@@ -514,19 +569,34 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val s = ui.value
         val c2 = Camera2CameraControl.from(cam.cameraControl)
         val r = s.ranges
+        if (s.mode == Mode.SLOWMO) return
         if (s.mode != Mode.PRO || r == null) {
-            c2.clearCaptureRequestOptions()
+            if (r?.ois == true) {
+                // Keep optical stabilization explicitly on (photo and video)
+                c2.setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder().setCaptureRequestOption(
+                        CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON,
+                    ).build()
+                )
+            } else c2.clearCaptureRequestOptions()
             cam.cameraControl.setExposureCompensationIndex(0)
             return
         }
         val m = s.manual
         val b = CaptureRequestOptions.Builder()
+        if (r.ois) {
+            b.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        }
         if (m.exposureManual && r.manualSensor) {
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
             b.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, m.iso.coerceIn(r.isoMin, r.isoMax))
             b.setCaptureRequestOption(
                 CaptureRequest.SENSOR_EXPOSURE_TIME, m.exposureNs.coerceIn(r.expMinNs, r.expMaxNs)
             )
+            // Aperture is only honoured with AE off; in auto exposure the camera picks it itself.
+            if (r.variableAperture && m.aperture in r.apertures) {
+                b.setCaptureRequestOption(CaptureRequest.LENS_APERTURE, m.aperture)
+            }
         }
         if (m.focusManual && r.manualFocus) {
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -547,11 +617,17 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         ui.update {
             val seedIso = if (ro.iso > 0) ro.iso else it.manual.iso
             val seedExp = if (ro.expNs > 0) ro.expNs else it.manual.exposureNs
+            val seedAp = when {
+                !r.variableAperture -> 0f
+                it.manual.aperture in r.apertures -> it.manual.aperture
+                else -> r.apertures.minByOrNull { a -> kotlin.math.abs(a - ro.aperture) } ?: r.apertures.first()
+            }
             it.copy(
                 manual = it.manual.copy(
                     exposureManual = on,
                     iso = seedIso.coerceIn(r.isoMin, r.isoMax),
                     exposureNs = seedExp.coerceIn(r.expMinNs, r.expMaxNs),
+                    aperture = seedAp,
                 )
             )
         }
@@ -562,6 +638,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun setExposureNs(ns: Long) { ui.update { it.copy(manual = it.manual.copy(exposureNs = ns)) }; applyManual() }
     fun setEv(index: Int) { ui.update { it.copy(manual = it.manual.copy(evIndex = index)) }; applyManual() }
     fun setAwb(mode: Int) { ui.update { it.copy(manual = it.manual.copy(awbMode = mode)) }; applyManual() }
+    fun setAperture(f: Float) { ui.update { it.copy(manual = it.manual.copy(aperture = f)) }; applyManual() }
 
     fun setFocusManual(on: Boolean) {
         val ro = readout.value
@@ -603,12 +680,25 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     fun setFormat(f: PhotoFormat) { ui.update { it.copy(format = f) }; rebind() }
-    fun setExtension(mode: Int) { ui.update { it.copy(extension = mode) }; rebind() }
+    fun setExtension(mode: Int) { ui.update { it.copy(extension = mode, hdr = false) }; rebind() }
+
+    /** Built-in HDR uses plain JPEG frames and no vendor extension. */
+    fun setHdr(on: Boolean) {
+        val s = ui.value
+        val needRebind = on && (s.extension != ExtensionMode.NONE || s.format != PhotoFormat.JPEG)
+        ui.update {
+            if (on) it.copy(hdr = true, extension = ExtensionMode.NONE, format = PhotoFormat.JPEG)
+            else it.copy(hdr = false)
+        }
+        if (needRebind) rebind()
+    }
 
     fun setVideoQuality(q: Quality) { ui.update { it.copy(video = it.video.copy(quality = q)) }; rebind() }
     fun setVideoFps(fps: Int) { ui.update { it.copy(video = it.video.copy(fps = fps)) }; rebind() }
     fun setVideoHdr(on: Boolean) { ui.update { it.copy(video = it.video.copy(hdr = on)) }; rebind() }
     fun setVideoStab(on: Boolean) { ui.update { it.copy(video = it.video.copy(stab = on)) }; rebind() }
+    fun setSlowMoQuality(q: Quality) { ui.update { it.copy(slowMo = it.slowMo.copy(quality = q)) }; rebind() }
+    fun setSlowMoFps(fps: Int) { ui.update { it.copy(slowMo = it.slowMo.copy(fps = fps)) }; rebind() }
     fun setMic(on: Boolean) { ui.update { it.copy(video = it.video.copy(mic = on)) } }
 
     fun cycleFlash() {
@@ -666,7 +756,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun onShutter() {
         when (ui.value.mode) {
             Mode.PHOTO, Mode.PRO -> capturePhoto()
-            Mode.VIDEO -> toggleRecording()
+            Mode.VIDEO, Mode.SLOWMO -> toggleRecording()
             Mode.QR -> {}
         }
     }
@@ -688,6 +778,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     delay(1000)
                 }
                 ui.update { it.copy(countdown = 0) }
+                if (s0.mode == Mode.PHOTO && s0.hdr && s0.extension == ExtensionMode.NONE) {
+                    captureHdr(ic)
+                    return@launch
+                }
                 repeat(s0.burst) {
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
                     takeOne(ic, activeFormat)
@@ -746,6 +840,100 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
     }
 
+    // ───────────────────────── built-in HDR ─────────────────────────
+
+    /**
+     * Three JPEG frames at 0, -2 and +2 EV (clamped to the camera's range), aligned and merged by
+     * [HdrProcessor]. Needs exposure compensation support; no vendor extension is involved.
+     */
+    private suspend fun captureHdr(ic: ImageCapture) {
+        val cam = camera ?: return
+        val r = ui.value.ranges
+        val st = prefs.settings.value
+        if (r == null || !r.evSupported || r.evStep <= 0f || r.evMax <= r.evMin) {
+            toast("HDR needs exposure compensation, which this camera does not support")
+            return
+        }
+        val steps = (2f / r.evStep).roundToInt().coerceAtLeast(1)
+        val indices = listOf(0, max(r.evMin, -steps), min(r.evMax, steps)).distinct()
+        if (indices.size < 2) {
+            toast("HDR is not available with this camera's exposure range")
+            return
+        }
+        val loc = if (st.geotag) MediaOutput.lastLocation(app) else null
+        val frames = ArrayList<Bitmap>(indices.size)
+        var rotationDeg = 0
+        toast("HDR: hold still")
+        try {
+            for ((n, idx) in indices.withIndex()) {
+                setEvAndWait(cam, idx)
+                if (n == 0 && st.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
+                val shot = captureBitmap(ic)
+                if (shot == null) {
+                    toast("HDR capture failed")
+                    frames.forEach { it.recycle() }
+                    return
+                }
+                frames += shot.first
+                rotationDeg = shot.second
+            }
+        } finally {
+            runCatching { cam.cameraControl.setExposureCompensationIndex(0) }
+        }
+        toast("Processing HDR…")
+        val uri = withContext(Dispatchers.Default) {
+            try {
+                val fused = HdrProcessor.fuse(frames, 0)
+                frames.forEach { it.recycle() }
+                val bytes = ByteArrayOutputStream().use { os ->
+                    fused.compress(Bitmap.CompressFormat.JPEG, 95, os)
+                    os.toByteArray()
+                }
+                fused.recycle()
+                MediaOutput.saveJpeg(app, bytes, MediaOutput.stamp(), "HDR", rotationDeg, loc)
+            } catch (_: OutOfMemoryError) {
+                null
+            } catch (_: Exception) {
+                null
+            }
+        }
+        if (uri != null) {
+            ui.update { it.copy(lastUri = uri) }
+            toast("HDR photo saved")
+        } else {
+            toast("HDR processing failed")
+        }
+    }
+
+    private suspend fun setEvAndWait(cam: Camera, index: Int) {
+        val f = cam.cameraControl.setExposureCompensationIndex(index)
+        suspendCancellableCoroutine<Unit> { c -> f.addListener({ if (c.isActive) c.resume(Unit) }, mainExec) }
+        delay(350) // let auto exposure settle on the new target
+    }
+
+    private suspend fun captureBitmap(ic: ImageCapture): Pair<Bitmap, Int>? =
+        suspendCancellableCoroutine { cont ->
+            ic.takePicture(io, object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val res: Pair<Bitmap, Int>? = try {
+                        val buf = image.planes[0].buffer
+                        val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
+                        val bmp: Bitmap? = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bmp != null) Pair(bmp, image.imageInfo.rotationDegrees) else null
+                    } catch (_: Throwable) {
+                        null
+                    } finally {
+                        image.close()
+                    }
+                    if (cont.isActive) cont.resume(res)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    if (cont.isActive) cont.resume(null)
+                }
+            })
+        }
+
     private fun toggleRecording() {
         val cur = recording
         if (cur != null) {
@@ -757,7 +945,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         var pending = vc.output.prepareRecording(app, MediaOutput.videoOptions(app, MediaOutput.stamp()))
         val micGranted = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        if (s.video.mic && micGranted) pending = pending.withAudioEnabled()
+        // High-speed sessions record without audio (a slowed-down soundtrack would be unusable)
+        if (s.video.mic && micGranted && s.mode != Mode.SLOWMO) pending = pending.withAudioEnabled()
         if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
 
         recording = pending.start(mainExec) { ev ->
