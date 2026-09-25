@@ -13,8 +13,18 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 enum class Mode(val label: String) {
-    PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO"), QR("QR")
+    PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO"), SLOWMO("SLO-MO"), QR("QR");
+
+    val isVideo: Boolean get() = this == VIDEO || this == SLOWMO
 }
+
+/** High-speed (slow-motion) recording state. Frames are captured at [fps] and played back at 30 fps. */
+data class SlowMoUi(
+    val qualities: List<Quality> = emptyList(),
+    val quality: Quality? = null,
+    val rates: List<Int> = emptyList(),
+    val fps: Int = 0,
+)
 
 enum class PhotoFormat(val label: String, val outputFormat: Int) {
     JPEG("JPEG", ImageCapture.OUTPUT_FORMAT_JPEG),
@@ -59,6 +69,8 @@ fun awbLabel(mode: Int): String = when (mode) {
 }
 
 /** Format kecepatan rana: 1/250 atau 0.5s / 2s */
+fun formatAperture(f: Float): String = if (f <= 0f) "—" else "f/" + ("%.1f".format(java.util.Locale.US, f))
+
 fun formatShutter(ns: Long): String {
     if (ns <= 0) return "—"
     val sec = ns / 1_000_000_000.0
@@ -88,6 +100,8 @@ data class ManualState(
     val focusDiopter: Float = 0f,
     val awbMode: Int = CaptureRequest.CONTROL_AWB_MODE_AUTO,
     val evIndex: Int = 0,
+    /** Lens f-number for variable-aperture cameras (e.g. Galaxy S9: f/1.5, f/2.4). 0 = camera default. */
+    val aperture: Float = 0f,
 )
 
 data class ManualRanges(
@@ -102,7 +116,13 @@ data class ManualRanges(
     val evStep: Float,
     val evSupported: Boolean,
     val awbModes: List<Int>,
+    /** Available f-numbers; more than one means the lens has a variable aperture. */
+    val apertures: List<Float> = emptyList(),
+    /** Optical image stabilization available on this lens. */
+    val ois: Boolean = false,
 ) {
+    val variableAperture: Boolean get() = apertures.size > 1
+
     val manualFocus: Boolean get() = minFocusDiopter > 0f
 
     fun isoAt(f: Float): Int =
@@ -145,7 +165,7 @@ data class FocusRing(val x: Float, val y: Float, val stamp: Long)
 data class QrHit(val text: String, val format: String)
 
 /** Nilai hidup dari sensor (ISO, rana, fokus) — dipisah agar tidak merekomposisi seluruh UI. */
-data class Readout(val iso: Int = 0, val expNs: Long = 0L, val focusDiopter: Float = 0f)
+data class Readout(val iso: Int = 0, val expNs: Long = 0L, val focusDiopter: Float = 0f, val aperture: Float = 0f)
 
 data class CamUi(
     val ready: Boolean = false,
@@ -170,12 +190,17 @@ data class CamUi(
     val formats: List<PhotoFormat> = listOf(PhotoFormat.JPEG),
     val extension: Int = ExtensionMode.NONE,
     val extensions: List<Int> = emptyList(),
+    /** Built-in multi-frame HDR (PHOTO mode, no vendor extension needed). */
+    val hdr: Boolean = false,
 
     val manual: ManualState = ManualState(),
     val ranges: ManualRanges? = null,
     val scope: ScopeSettings = ScopeSettings(),
 
     val video: VideoUi = VideoUi(),
+    val slowMo: SlowMoUi = SlowMoUi(),
+    /** The current camera supports high-speed recording (enables the SLO-MO mode). */
+    val slowMoOk: Boolean = false,
     val recording: Boolean = false,
     val paused: Boolean = false,
     val recordedMs: Long = 0L,
