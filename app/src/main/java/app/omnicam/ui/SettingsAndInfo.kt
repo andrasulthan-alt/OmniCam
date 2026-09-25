@@ -58,7 +58,7 @@ fun SettingsSheet(
             Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("Pengaturan", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("Settings", fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
             Text("Grid", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -68,23 +68,23 @@ fun SettingsSheet(
             }
 
             SwitchRow(
-                "Hapus metadata privasi",
-                "Buang lokasi GPS dan identitas perangkat/lensa dari EXIF JPEG (tidak berlaku untuk Ultra HDR & DNG).",
+                "Strip private metadata",
+                "Remove GPS location and device/lens identifiers from JPEG EXIF (does not apply to Ultra HDR & DNG).",
                 settings.stripMetadata,
             ) { on -> onChange { it.copy(stripMetadata = on) } }
             SwitchRow(
-                "Simpan lokasi (geotag)",
-                "Menyimpan lokasi terakhir ke foto. Mati secara default.",
+                "Save location (geotag)",
+                "Adds your last known location to photos. Off by default.",
                 settings.geotag,
                 onGeotag,
             )
-            SwitchRow("Indikator level horizon", "Garis kemiringan dari sensor akselerometer; hijau saat rata.", settings.level) { on -> onChange { it.copy(level = on) } }
-            SwitchRow("Bunyi rana", "Suara saat foto/rekaman.", settings.shutterSound) { on -> onChange { it.copy(shutterSound = on) } }
-            SwitchRow("Tombol volume = rana", "Tekan volume untuk memotret/merekam.", settings.volumeShutter) { on -> onChange { it.copy(volumeShutter = on) } }
-            SwitchRow("Cerminkan foto kamera depan", "Hasil foto selfie dibalik seperti preview.", settings.mirrorFront) { on -> onChange { it.copy(mirrorFront = on) } }
-            SwitchRow("Utamakan kualitas", "Mati = utamakan kecepatan (latensi minimum).", settings.qualityFirst) { on -> onChange { it.copy(qualityFirst = on) } }
+            SwitchRow("Horizon level indicator", "Tilt line from the accelerometer; turns green when level.", settings.level) { on -> onChange { it.copy(level = on) } }
+            SwitchRow("Shutter sound", "Sound when taking photos or recording.", settings.shutterSound) { on -> onChange { it.copy(shutterSound = on) } }
+            SwitchRow("Volume keys = shutter", "Press a volume key to take a photo or record.", settings.volumeShutter) { on -> onChange { it.copy(volumeShutter = on) } }
+            SwitchRow("Mirror front camera photos", "Selfies are saved flipped, like the preview.", settings.mirrorFront) { on -> onChange { it.copy(mirrorFront = on) } }
+            SwitchRow("Prioritize quality", "Off = prioritize speed (minimum latency).", settings.qualityFirst) { on -> onChange { it.copy(qualityFirst = on) } }
 
-            Chip("ⓘ  Info kamera & kemampuan perangkat", onClick = onInfo)
+            Chip("ⓘ  Camera info & device capabilities", onClick = onInfo)
             Box(Modifier.padding(bottom = 16.dp))
         }
     }
@@ -113,11 +113,11 @@ fun InfoScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize().background(Color(0xFF0B0F14)).statusBarsPadding().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Chip("← Kembali", onClick = onBack)
-            Text("Info kamera", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp))
+            Chip("← Back", onClick = onBack)
+            Text("Camera info", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp))
             reports?.let { rl ->
                 Box(Modifier.weight(1f))
-                Chip("Salin laporan") {
+                Chip("Copy report") {
                     val head = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} | Android ${android.os.Build.VERSION.RELEASE} " +
                         "(API ${android.os.Build.VERSION.SDK_INT}) | ${android.os.Build.DISPLAY}"
                     val body = rl.joinToString("\n\n") { r ->
@@ -130,7 +130,7 @@ fun InfoScreen(onBack: () -> Unit) {
         }
         val list = reports
         if (list == null) {
-            Text("Memuat…", color = Color.Gray, modifier = Modifier.padding(16.dp))
+            Text("Loading…", color = Color.Gray, modifier = Modifier.padding(16.dp))
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),

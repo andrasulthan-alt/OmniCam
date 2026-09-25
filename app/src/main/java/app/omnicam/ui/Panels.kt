@@ -81,15 +81,15 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
 
         // Eksposur
         ChipRow {
-            Chip("Eksposur Auto", !m.exposureManual) { engine.setExposureManual(false) }
-            Chip("Eksposur Manual", m.exposureManual, enabled = r.manualSensor) { engine.setExposureManual(true) }
+            Chip("Auto exposure", !m.exposureManual) { engine.setExposureManual(false) }
+            Chip("Manual exposure", m.exposureManual, enabled = r.manualSensor) { engine.setExposureManual(true) }
         }
         if (m.exposureManual && r.manualSensor) {
             LabeledSlider("ISO", "${m.iso}", r.isoFrac(m.iso)) { engine.setIso(r.isoAt(it)) }
-            LabeledSlider("Rana", formatShutter(m.exposureNs), r.expFrac(m.exposureNs)) { engine.setExposureNs(r.expAt(it)) }
+            LabeledSlider("Shutter", formatShutter(m.exposureNs), r.expFrac(m.exposureNs)) { engine.setExposureNs(r.expAt(it)) }
         } else if (r.evSupported && r.evMax > r.evMin) {
             LabeledSlider(
-                label = "Kompensasi EV",
+                label = "EV compensation",
                 valueText = "%+.1f".format(m.evIndex * r.evStep),
                 value = m.evIndex.toFloat(),
                 valueRange = r.evMin.toFloat()..r.evMax.toFloat(),
@@ -97,18 +97,18 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
             ) { engine.setEv(it.roundToInt()) }
         }
         if (!r.manualSensor) {
-            Text("Kamera ini tidak mengekspos kontrol sensor manual (MANUAL_SENSOR).", color = Color.Gray, fontSize = 11.sp)
+            Text("This camera does not expose manual sensor controls (MANUAL_SENSOR).", color = Color.Gray, fontSize = 11.sp)
         }
 
         // Fokus
         ChipRow {
-            Chip("Fokus Auto", !m.focusManual) { engine.setFocusManual(false) }
-            Chip("Fokus Manual", m.focusManual, enabled = r.manualFocus) { engine.setFocusManual(true) }
+            Chip("Autofocus", !m.focusManual) { engine.setFocusManual(false) }
+            Chip("Manual focus", m.focusManual, enabled = r.manualFocus) { engine.setFocusManual(true) }
         }
         if (m.focusManual && r.manualFocus) {
             val d = m.focusDiopter
             LabeledSlider(
-                label = "Jarak fokus",
+                label = "Focus distance",
                 valueText = if (d < 0.05f) "∞" else "${(100f / d).roundToInt()} cm",
                 value = d / r.minFocusDiopter,
             ) { engine.setFocusDiopter(it * r.minFocusDiopter) }
@@ -140,7 +140,7 @@ fun VideoPanel(ui: CamUi, engine: CameraEngine, onMicToggle: (Boolean) -> Unit) 
         Chip("30 fps", v.fps == 30, enabled = !ui.recording) { engine.setVideoFps(30) }
         Chip("60 fps", v.fps == 60, enabled = v.fps60Ok && !ui.recording) { engine.setVideoFps(60) }
         Chip("HDR10 HLG", v.hdr, enabled = v.hdrOk && !ui.recording) { engine.setVideoHdr(!v.hdr) }
-        Chip("Stabil", v.stab, enabled = v.stabOk && !ui.recording) { engine.setVideoStab(!v.stab) }
-        Chip(if (v.mic) "Mic aktif" else "Mic mati", v.mic, enabled = !ui.recording) { onMicToggle(!v.mic) }
+        Chip("Stabilize", v.stab, enabled = v.stabOk && !ui.recording) { engine.setVideoStab(!v.stab) }
+        Chip(if (v.mic) "Mic on" else "Mic off", v.mic, enabled = !ui.recording) { onMicToggle(!v.mic) }
     }
 }

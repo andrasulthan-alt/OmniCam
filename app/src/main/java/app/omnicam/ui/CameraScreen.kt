@@ -316,7 +316,7 @@ private fun LensRow(ui: CamUi, engine: CameraEngine) {
 @Composable
 private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
     if (ui.mode == Mode.QR) {
-        Text("Arahkan ke kode", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
+        Text("Point at a code", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
         return
     }
     val inner = when {
@@ -388,16 +388,16 @@ private fun QrCard(text: String, format: String, engine: CameraEngine, modifier:
         // Isi kode = data tak tepercaya: tampilkan apa adanya, jangan buka otomatis.
         Text(text, color = Color.White, fontSize = 15.sp, maxLines = 6)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Salin") {
+            Chip("Copy") {
                 ctx.getSystemService(ClipboardManager::class.java)
                     .setPrimaryClip(ClipData.newPlainText("QR", text))
             }
-            if (isUrl) Chip("Buka tautan") {
+            if (isUrl) Chip("Open link") {
                 runCatching {
                     ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(text)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
             }
-            Chip("Tutup") { engine.clearQr() }
+            Chip("Close") { engine.clearQr() }
         }
     }
 }
