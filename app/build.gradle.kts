@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "app.omnicam"
-        minSdk = 30          // zoom ratio API, MediaStore relative path, Camera2 modern
+        minSdk = 30          // Android 11+: zoom ratio API, MediaStore relative path, modern Camera2
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.2.1"
     }
 
     buildTypes {
