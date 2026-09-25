@@ -23,11 +23,15 @@ old one first. Your photos and videos stay in your gallery; only the app's setti
 | Strips GPS and device identifiers from JPEG EXIF; location off by default; permissions asked only when needed | GrapheneOS Camera |
 | Safe probing of vendor extensions (HDR / Night / Portrait / Retouch) | GrapheneOS Camera |
 | Manual ISO, shutter speed, focus, white balance presets, EV compensation | Open Camera, FreeDcam, Native Camera |
+| Aperture control on variable-aperture lenses (e.g. Galaxy S9/S9+: f/1.5 and f/2.4) in manual exposure | Native Camera |
+| Built-in HDR photo mode: 3 hand-held exposures (−2 / 0 / +2 EV), automatic alignment, ghost removal and exposure fusion. Works without vendor extensions | Camera Go, Open Camera |
 | RAW (DNG), RAW+JPEG, Ultra HDR (where the device supports them) | Open Camera, FreeDcam, Native Camera |
 | Histogram, zebra stripes, focus peaking | FreeDcam |
 | Timer (3/10 s), burst (3/5/10), grids (3×3, 4×4, golden), volume keys as shutter | Open Camera, Fossify, Libre Camera |
 | Zoom chips and lens picker (35 mm equivalent) | GrapheneOS Camera, MA Camera |
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
+| SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps), saved as slow-motion video | Open Camera |
+| Optical image stabilization kept on for photo and video when the lens has OIS | — |
 | Horizon level indicator | Open Camera |
 | Works as the camera for other apps (`IMAGE_CAPTURE` / `VIDEO_CAPTURE`) | Open Camera, Fossify, GrapheneOS Camera |
 | Camera info screen (hardware level, capabilities, sensor, RAW sizes, extensions) with a copyable report | CameraX Info |
@@ -46,15 +50,26 @@ your device exposes, and use **Copy report** when filing a bug.
 ## Tested devices
 | Device | Android | Result |
 |---|---|---|
-| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Testing in progress |
+| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work. See known issues. |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
+
+## Known issues
+- **Galaxy S9+ on Pixel Experience 13:** while recording in 4K, the viewfinder shows smeared lines near the edges when the
+  phone moves. The saved 4K video is not affected, and 1080p is clean. Other Camera2 apps (e.g. Native Camera) show the same
+  artifact at 4K on this ROM, so it comes from the ROM's camera driver, not from OmniCam.
+- Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
+  Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
+- Built-in HDR corrects hand shake and removes most ghosts from moving subjects by falling back to the normal exposure
+  where something moved. In very bright (clipped) areas movement cannot be detected, so faint ghosts are still possible
+  there. Processing takes a few seconds on older phones.
 
 ## Roadmap
 - RAW video (MotionCam-style)
 - Exposure/focus bracketing, timelapse, panorama
 - Choosing a save folder (SAF / SD card); honoring duration/size limits for `VIDEO_CAPTURE`
-- Direct access to physical cameras not exposed through CameraX; slow motion
+- Direct access to physical cameras not exposed through CameraX
+- Night mode (multi-frame noise reduction); smarter HDR ghost handling in clipped highlights
 - RGB histogram / waveform, translations, automated tests
 - A permanent release signing key and a stable release
 
@@ -72,6 +87,7 @@ app/src/main/java/app/omnicam/
   ExternalCapture.kt          # IMAGE_CAPTURE / VIDEO_CAPTURE for other apps
   camera/CameraEngine.kt      # CameraX binding, photo/video, manual controls, extensions
   camera/Analyzers.kt         # histogram / zebra / peaking and QR scanner
+  camera/HdrProcessor.kt      # built-in HDR: frame alignment (MTB) + exposure fusion
   camera/CameraInspector.kt   # camera info screen
   storage/Storage.kt          # preferences, MediaStore output, EXIF scrubbing, geotagging
   model/Models.kt             # UI state and helpers
