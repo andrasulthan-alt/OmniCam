@@ -99,11 +99,11 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text("OmniCam membutuhkan izin kamera untuk menampilkan pratinjau.",
+                        Text("OmniCam needs camera permission to show the preview.",
                             color = Color.White, fontSize = 16.sp, textAlign = TextAlign.Center)
-                        Text("Mikrofon dan lokasi hanya diminta saat Anda mengaktifkan fitur terkait.",
+                        Text("Microphone and location are only requested when you turn on the related feature.",
                             color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
-                        Chip("Izinkan kamera") { launcher.launch(Manifest.permission.CAMERA) }
+                        Chip("Allow camera") { launcher.launch(Manifest.permission.CAMERA) }
                     }
                 }
             }
