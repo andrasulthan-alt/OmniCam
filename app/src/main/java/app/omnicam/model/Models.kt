@@ -13,7 +13,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 enum class Mode(val label: String) {
-    PHOTO("FOTO"), PRO("PRO"), VIDEO("VIDEO"), QR("QR")
+    PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO"), QR("QR")
 }
 
 enum class PhotoFormat(val label: String, val outputFormat: Int) {
@@ -26,16 +26,16 @@ enum class PhotoFormat(val label: String, val outputFormat: Int) {
 }
 
 enum class GridType(val label: String) {
-    OFF("Mati"), THIRDS("3×3"), GRID4("4×4"), GOLDEN("Golden")
+    OFF("Off"), THIRDS("3×3"), GRID4("4×4"), GOLDEN("Golden")
 }
 
 fun extensionLabel(mode: Int): String = when (mode) {
     ExtensionMode.AUTO -> "Auto"
     ExtensionMode.HDR -> "HDR"
-    ExtensionMode.NIGHT -> "Malam"
-    ExtensionMode.BOKEH -> "Potret"
+    ExtensionMode.NIGHT -> "Night"
+    ExtensionMode.BOKEH -> "Portrait"
     ExtensionMode.FACE_RETOUCH -> "Retouch"
-    else -> "Mati"
+    else -> "Off"
 }
 
 fun qualityLabel(q: Quality): String = when (q) {
@@ -48,13 +48,13 @@ fun qualityLabel(q: Quality): String = when (q) {
 
 fun awbLabel(mode: Int): String = when (mode) {
     CaptureRequest.CONTROL_AWB_MODE_AUTO -> "Auto"
-    CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT -> "Lampu pijar"
-    CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT -> "Neon"
-    CaptureRequest.CONTROL_AWB_MODE_WARM_FLUORESCENT -> "Neon hangat"
-    CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT -> "Siang"
-    CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "Mendung"
-    CaptureRequest.CONTROL_AWB_MODE_TWILIGHT -> "Senja"
-    CaptureRequest.CONTROL_AWB_MODE_SHADE -> "Bayangan"
+    CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT -> "Incandescent"
+    CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT -> "Fluorescent"
+    CaptureRequest.CONTROL_AWB_MODE_WARM_FLUORESCENT -> "Warm fluorescent"
+    CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT -> "Daylight"
+    CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "Cloudy"
+    CaptureRequest.CONTROL_AWB_MODE_TWILIGHT -> "Twilight"
+    CaptureRequest.CONTROL_AWB_MODE_SHADE -> "Shade"
     else -> "WB $mode"
 }
 
@@ -76,7 +76,7 @@ data class LensOption(
     val eqMm: Float,
 ) {
     val label: String
-        get() = if (eqMm > 0f) "${eqMm.roundToInt()}mm" else "Kam $id"
+        get() = if (eqMm > 0f) "${eqMm.roundToInt()}mm" else "Cam $id"
 }
 
 data class ManualState(
