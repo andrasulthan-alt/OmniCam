@@ -39,9 +39,9 @@ object CameraInspector {
         fun add(k: String, v: String?) { if (!v.isNullOrBlank()) rows += k to v }
 
         val facing = when (c.get(CameraCharacteristics.LENS_FACING)) {
-            CameraMetadata.LENS_FACING_FRONT -> "Depan"
-            CameraMetadata.LENS_FACING_BACK -> "Belakang"
-            CameraMetadata.LENS_FACING_EXTERNAL -> "Eksternal"
+            CameraMetadata.LENS_FACING_FRONT -> "Front"
+            CameraMetadata.LENS_FACING_BACK -> "Back"
+            CameraMetadata.LENS_FACING_EXTERNAL -> "External"
             else -> "?"
         }
         val level = when (c.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
@@ -52,65 +52,65 @@ object CameraInspector {
             CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL -> "EXTERNAL"
             else -> "?"
         }
-        add("Hadap", facing)
-        add("Level hardware", level)
+        add("Facing", facing)
+        add("Hardware level", level)
 
         val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
-        add("Kapabilitas", caps.joinToString(", ") { capNames[it] ?: "#$it" })
+        add("Capabilities", caps.joinToString(", ") { capNames[it] ?: "#$it" })
 
         val phys = c.physicalCameraIds
-        if (phys.isNotEmpty()) add("Kamera fisik (di balik kamera logis)", phys.joinToString(", "))
+        if (phys.isNotEmpty()) add("Physical cameras (behind logical camera)", phys.joinToString(", "))
 
         val fls = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
         val sensor = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
         add("Focal length", fls?.joinToString(", ") { "%.2f mm".format(it) })
         if (fls != null && sensor != null && fls.isNotEmpty()) {
             val eq = fls[0] * 43.27f / hypot(sensor.width, sensor.height)
-            add("Ekuivalen 35mm", "${eq.roundToInt()} mm")
+            add("35mm equivalent", "${eq.roundToInt()} mm")
         }
-        add("Ukuran sensor", sensor?.let { "%.2f × %.2f mm".format(it.width, it.height) })
-        add("Piksel sensor", c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.let { "${it.width} × ${it.height}" })
+        add("Sensor size", sensor?.let { "%.2f × %.2f mm".format(it.width, it.height) })
+        add("Sensor pixels", c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)?.let { "${it.width} × ${it.height}" })
         add("Aperture", c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.joinToString(", ") { "f/%.1f".format(it) })
-        add("Rentang ISO", c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { "${it.lower} – ${it.upper}" })
-        add("Rentang rana", c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
+        add("ISO range", c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { "${it.lower} – ${it.upper}" })
+        add("Shutter range", c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let {
             "${it.lower / 1000} µs – ${"%.1f".format(it.upper / 1e9)} s"
         })
         val minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
-        add("Fokus manual", if (minFocus != null && minFocus > 0f) "Ya (terdekat ≈ ${(100f / minFocus).roundToInt()} cm)" else "Tidak (fixed/AF saja)")
+        add("Manual focus", if (minFocus != null && minFocus > 0f) "Yes (closest ≈ ${(100f / minFocus).roundToInt()} cm)" else "No (fixed/AF only)")
         add("Zoom ratio", c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { "%.1f× – %.1f×".format(it.lower, it.upper) })
-        add("Flash", if (c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) "Ada" else "Tidak ada")
+        add("Flash", if (c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) "Yes" else "None")
         add("OIS", if (c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-                ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true) "Ya" else "Tidak")
+                ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true) "Yes" else "No")
         val vs = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
-        add("Stabilisasi video", buildString {
+        add("Video stabilization", buildString {
             if (vs.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)) append("EIS ")
             if (Build.VERSION.SDK_INT >= 33 && vs.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)) append("Preview ")
-        }.trim().ifEmpty { "Tidak ada" })
+        }.trim().ifEmpty { "None" })
 
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         fun maxSize(fmt: Int): String? = map?.getOutputSizes(fmt)
             ?.maxByOrNull { it.width.toLong() * it.height }
             ?.let { "${it.width}×${it.height} (%.1f MP)".format(it.width * it.height / 1e6) }
-        add("JPEG maksimum", maxSize(ImageFormat.JPEG))
-        add("RAW_SENSOR maksimum", maxSize(ImageFormat.RAW_SENSOR))
+        add("Max JPEG", maxSize(ImageFormat.JPEG))
+        add("Max RAW_SENSOR", maxSize(ImageFormat.RAW_SENSOR))
         val hs = map?.highSpeedVideoFpsRanges
-        if (hs != null && hs.isNotEmpty()) add("Video high-speed s/d", "${hs.maxOf { it.upper }} fps")
+        if (hs != null && hs.isNotEmpty()) add("High-speed video up to", "${hs.maxOf { it.upper }} fps")
 
         if (Build.VERSION.SDK_INT >= 31) {
             val ext = runCatching { cm.getCameraExtensionCharacteristics(id).supportedExtensions }.getOrNull()
             if (!ext.isNullOrEmpty()) {
-                add("Ekstensi vendor", ext.joinToString(", ") {
+                add("Vendor extensions", ext.joinToString(", ") {
                     when (it) {
                         CameraExtensionCharacteristics.EXTENSION_AUTOMATIC -> "Auto"
                         CameraExtensionCharacteristics.EXTENSION_HDR -> "HDR"
-                        CameraExtensionCharacteristics.EXTENSION_NIGHT -> "Malam"
+                        CameraExtensionCharacteristics.EXTENSION_NIGHT -> "Night"
                         CameraExtensionCharacteristics.EXTENSION_FACE_RETOUCH -> "Retouch"
                         else -> "#$it"
                     }
                 })
             }
         }
-        val title = "Kamera $id — $facing" + if (phys.isNotEmpty()) " (logis)" else ""
+        val title = "Camera $id — $facing" + if (phys.isNotEmpty()) " (logical)" else ""
         return CameraReport(id, title, rows)
     }
 }

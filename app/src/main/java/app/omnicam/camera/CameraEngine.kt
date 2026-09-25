@@ -179,7 +179,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val p = try {
                 f.get()
             } catch (e: Exception) {
-                toast("Kamera tidak tersedia: ${e.message}")
+                toast("Camera unavailable: ${e.message}")
                 return@addListener
             }
             provider = p
@@ -420,11 +420,11 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             return true
         } catch (e: IllegalArgumentException) {
             if (withAnalysis && s.mode == Mode.PRO) {
-                toast("Kombinasi format + alat bantu tidak didukung; histogram/zebra dimatikan.")
-            } else toast("Konfigurasi kamera tidak didukung: ${e.message}")
+                toast("This format + overlay combination is not supported; histogram/zebra turned off.")
+            } else toast("Camera configuration not supported: ${e.message}")
             return false
         } catch (e: Exception) {
-            toast("Gagal membuka kamera: ${e.message}")
+            toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
     }
@@ -693,7 +693,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             }
 
             override fun onError(exception: ImageCaptureException) {
-                toast("Gagal menyimpan foto: ${exception.message}")
+                toast("Failed to save photo: ${exception.message}")
                 if (cont.isActive) cont.resume(Unit)
             }
         }
@@ -713,7 +713,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 )
             }
         } catch (e: Exception) {
-            toast("Gagal mengambil foto: ${e.message}")
+            toast("Failed to take photo: ${e.message}")
             if (cont.isActive) cont.resume(Unit)
         }
     }
@@ -743,7 +743,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     recording = null
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
                     ui.update { it.copy(recording = false, paused = false, recordedMs = 0) }
-                    if (ev.hasError()) toast("Rekaman berhenti (kode ${ev.error})")
+                    if (ev.hasError()) toast("Recording stopped (code ${ev.error})")
                     else ui.update { it.copy(lastUri = ev.outputResults.outputUri) }
                 }
                 else -> {}
