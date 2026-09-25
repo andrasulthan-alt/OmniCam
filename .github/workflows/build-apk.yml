@@ -16,10 +16,10 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Accept Android SDK licenses (AGP mengunduh platform 37 otomatis)
+      - name: Accept Android SDK licenses (AGP downloads platform 37 automatically)
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      # gradle-wrapper.jar tidak disertakan di repo, jadi pakai Gradle langsung
+      # gradle-wrapper.jar is not committed, so use Gradle directly
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
