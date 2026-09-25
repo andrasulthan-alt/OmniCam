@@ -1,13 +1,18 @@
 OmniCam
-Hak cipta (C) 2026 para kontributor OmniCam.
+Copyright (C) 2026 OmniCam contributors
 
-Program ini perangkat lunak bebas: Anda boleh mendistribusikan ulang dan/atau memodifikasinya
-di bawah ketentuan GNU General Public License versi 3 atau (sesuai pilihan Anda) versi yang lebih baru.
-Program ini dibagikan TANPA JAMINAN APA PUN. Lihat berkas LICENSE.
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
 
-Kode ditulis dari nol. Fitur terinspirasi (bukan disalin) dari: GrapheneOS Camera (MIT), Open Camera,
-Fossify Camera, FreeDcam, MA Camera, Libre Camera, CameraX Info, dan konsep MotionCam / Native Camera.
-Jika suatu saat kode dari proyek lain disalin, tambahkan atribusi dan pastikan lisensinya kompatibel dengan GPLv3
-(catatan: FreeDcam berlisensi GPLv2 saja, tidak kompatibel untuk disalin ke proyek GPLv3).
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE
+file for details.
 
-Dependensi: AndroidX/CameraX/Compose (Apache-2.0), ZXing (Apache-2.0), Kotlin (Apache-2.0).
+The code is original. Features were inspired by (not copied from): GrapheneOS Camera (MIT),
+Open Camera, Fossify Camera, FreeDcam, MA Camera, Libre Camera, CameraX Info, and the concepts
+behind MotionCam and Native Camera. If code from another project is ever copied in, add attribution
+and make sure its license is compatible with GPLv3 (note: FreeDcam is GPLv2-only and cannot be
+copied into a GPLv3 project).
+
+Dependencies: AndroidX / CameraX / Jetpack Compose (Apache-2.0), ZXing (Apache-2.0), Kotlin (Apache-2.0).
