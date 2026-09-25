@@ -120,7 +120,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
 
         // ───── Viewfinder ─────
-        val ratio = if (ui.mode == Mode.VIDEO) 9f / 16f else 3f / 4f
+        val ratio = if (ui.mode.isVideo) 9f / 16f else 3f / 4f
         Box(
             Modifier
                 .align(Alignment.TopCenter)
@@ -194,6 +194,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                         if (on && !ctx.has(Manifest.permission.RECORD_AUDIO)) micLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         else engine.setMic(on)
                     }
+                    Mode.SLOWMO -> SlowMoPanel(ui, engine)
                     else -> {}
                 }
             }
@@ -221,7 +222,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
             ) {
-                Mode.entries.forEach { m ->
+                Mode.entries.filter { it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO }.forEach { m ->
                     Text(
                         m.label,
                         color = if (ui.mode == m) Accent else Color.White.copy(alpha = 0.7f),
@@ -320,7 +321,7 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
         return
     }
     val inner = when {
-        ui.mode == Mode.VIDEO -> Color(0xFFFF3B30)
+        ui.mode.isVideo -> Color(0xFFFF3B30)
         ui.busy -> Color(0xFFFFB300)
         else -> Color.White
     }

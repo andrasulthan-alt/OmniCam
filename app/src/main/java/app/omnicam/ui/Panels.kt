@@ -25,6 +25,7 @@ import app.omnicam.model.CamUi
 import app.omnicam.model.Readout
 import app.omnicam.model.awbLabel
 import app.omnicam.model.extensionLabel
+import app.omnicam.model.formatAperture
 import app.omnicam.model.formatShutter
 import app.omnicam.model.qualityLabel
 import kotlin.math.roundToInt
@@ -37,19 +38,29 @@ private fun ChipRow(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-/** Baris ekstensi vendor (HDR/Malam/Potret) untuk mode FOTO. */
+/** PHOTO mode row: built-in HDR, vendor extensions (if any), Ultra HDR. */
 @Composable
 fun ExtensionRow(ui: CamUi, engine: CameraEngine) {
-    if (ui.extensions.isEmpty() && ui.formats.size <= 1) return
+    val r = ui.ranges
+    val builtInHdr = r != null && r.evSupported && r.evMax > r.evMin
+    if (!builtInHdr && ui.extensions.isEmpty() && ui.formats.size <= 1) return
     ChipRow {
-        if (ui.extensions.isNotEmpty()) {
-            Chip("Std", ui.extension == ExtensionMode.NONE) { engine.setExtension(ExtensionMode.NONE) }
-            ui.extensions.forEach { m ->
-                Chip(extensionLabel(m), ui.extension == m) { engine.setExtension(m) }
-            }
+        Chip("Std", ui.extension == ExtensionMode.NONE && !ui.hdr, enabled = !ui.busy) {
+            engine.setHdr(false)
+            if (ui.extension != ExtensionMode.NONE) engine.setExtension(ExtensionMode.NONE)
+        }
+        if (builtInHdr) {
+            Chip("HDR", ui.hdr, enabled = !ui.busy) { engine.setHdr(!ui.hdr) }
+        }
+        ui.extensions.forEach { m ->
+            // Vendor HDR is labelled separately so it is not confused with the built-in HDR
+            val label = if (m == ExtensionMode.HDR) "HDR (vendor)" else extensionLabel(m)
+            Chip(label, ui.extension == m, enabled = !ui.busy) { engine.setExtension(m) }
         }
         ui.formats.filter { it.name == "ULTRA_HDR" }.forEach { f ->
-            Chip(f.label, ui.format == f) { engine.setFormat(if (ui.format == f) app.omnicam.model.PhotoFormat.JPEG else f) }
+            Chip(f.label, ui.format == f, enabled = !ui.hdr) {
+                engine.setFormat(if (ui.format == f) app.omnicam.model.PhotoFormat.JPEG else f)
+            }
         }
     }
 }
@@ -87,6 +98,12 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
         if (m.exposureManual && r.manualSensor) {
             LabeledSlider("ISO", "${m.iso}", r.isoFrac(m.iso)) { engine.setIso(r.isoAt(it)) }
             LabeledSlider("Shutter", formatShutter(m.exposureNs), r.expFrac(m.exposureNs)) { engine.setExposureNs(r.expAt(it)) }
+            if (r.variableAperture) {
+                ChipRow {
+                    Text("Aperture", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                    r.apertures.forEach { a -> Chip(formatAperture(a), m.aperture == a) { engine.setAperture(a) } }
+                }
+            }
         } else if (r.evSupported && r.evMax > r.evMin) {
             LabeledSlider(
                 label = "EV compensation",
@@ -122,8 +139,9 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
             }
         }
         if (!m.exposureManual && readout.iso > 0) {
+            val ap = if (r.variableAperture && readout.aperture > 0f) " · ${formatAperture(readout.aperture)}" else ""
             Text(
-                "Auto: ISO ${readout.iso} · ${formatShutter(readout.expNs)}",
+                "Auto: ISO ${readout.iso} · ${formatShutter(readout.expNs)}$ap",
                 color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp,
             )
         }
@@ -142,5 +160,27 @@ fun VideoPanel(ui: CamUi, engine: CameraEngine, onMicToggle: (Boolean) -> Unit) 
         Chip("HDR10 HLG", v.hdr, enabled = v.hdrOk && !ui.recording) { engine.setVideoHdr(!v.hdr) }
         Chip("Stabilize", v.stab && v.stabOk, enabled = v.stabOk && !ui.recording) { engine.setVideoStab(!v.stab) }
         Chip(if (v.mic) "Mic on" else "Mic off", v.mic, enabled = !ui.recording) { onMicToggle(!v.mic) }
+    }
+}
+
+/** SLO-MO mode: resolution and capture frame rate. Playback is 30 fps, so 240 fps = 8x slower. */
+@Composable
+fun SlowMoPanel(ui: CamUi, engine: CameraEngine) {
+    val sm = ui.slowMo
+    if (sm.qualities.size > 1) {
+        ChipRow {
+            sm.qualities.forEach { q -> Chip(qualityLabel(q), sm.quality == q, enabled = !ui.recording) { engine.setSlowMoQuality(q) } }
+        }
+    }
+    if (sm.rates.isNotEmpty()) {
+        ChipRow {
+            sm.rates.forEach { r -> Chip("$r fps", sm.fps == r, enabled = !ui.recording) { engine.setSlowMoFps(r) } }
+        }
+    }
+    if (sm.fps > 0) {
+        Text(
+            "Plays back ${sm.fps / 30}× slower · no audio",
+            color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp,
+        )
     }
 }
