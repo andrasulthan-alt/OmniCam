@@ -99,6 +99,9 @@ object MediaOutput {
     fun videoOptions(ctx: Context, stamp: String): MediaStoreOutputOptions {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "VID_$stamp")
+            // Wajib: tanpa MIME type, MediaStore menolak insert ke koleksi video
+            // dan CameraX melapor ERROR_INVALID_OUTPUT_OPTIONS (kode 5).
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             put(MediaStore.MediaColumns.RELATIVE_PATH, DIR)
         }
         return MediaStoreOutputOptions
