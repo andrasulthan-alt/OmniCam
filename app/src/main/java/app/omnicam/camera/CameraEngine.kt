@@ -302,7 +302,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val p = provider ?: return
         val o = owner ?: return
         val v = previewView ?: return
-        if (!tryBind(p, o, v, withAnalysis = true)) tryBind(p, o, v, withAnalysis = false)
+        if (tryBind(p, o, v, withAnalysis = true) || tryBind(p, o, v, withAnalysis = false)) return
+        // Some devices reject stabilized configurations; retry once without stabilization.
+        if (ui.value.video.stab) {
+            ui.update { it.copy(video = it.video.copy(stab = false)) }
+            if (tryBind(p, o, v, withAnalysis = false)) toast("Stabilization is not supported with these settings")
+        }
     }
 
     private fun tryBind(p: ProcessCameraProvider, o: LifecycleOwner, v: PreviewView, withAnalysis: Boolean): Boolean {
@@ -324,9 +329,32 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
             } else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
 
-            val previewBuilder = Preview.Builder()
-                .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
+            // Video stabilization (off by default). Preferred: preview stabilization, which stabilizes the
+            // viewfinder and the recording with the same crop. Fallback: video-only EIS.
+            val videoCaps = if (s.mode == Mode.VIDEO) Recorder.getVideoCapabilities(info) else null
+            val previewStabOk = s.mode == Mode.VIDEO &&
+                runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported }.getOrDefault(false)
+            val videoStabOk = videoCaps?.isStabilizationSupported == true
+            val usePreviewStab = s.video.stab && previewStabOk
+            val useVideoStab = s.video.stab && !previewStabOk && videoStabOk
+
+            // 4K recording: keep the viewfinder stream small (720p). On some devices/ROMs a large preview
+            // stream next to a 4K recording stream shows smeared/torn rows in the viewfinder,
+            // while the recorded file is fine. A smaller preview lowers the load on the camera pipeline.
+            val videoRange = if (s.video.hdr) DynamicRange.HLG_10_BIT else DynamicRange.SDR
+            val plannedQuality = videoCaps?.let { c ->
+                val qs = c.getSupportedQualities(videoRange).ifEmpty { c.getSupportedQualities(DynamicRange.SDR) }
+                s.video.quality?.takeIf { it in qs } ?: qs.firstOrNull()
+            }
+            val previewSelector = ResolutionSelector.Builder().setAspectRatioStrategy(ratio).apply {
+                if (plannedQuality == Quality.UHD) setResolutionStrategy(
+                    ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                )
+            }.build()
+            val previewBuilder = Preview.Builder().setResolutionSelector(previewSelector)
             if (!extActive) Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCb)
+            if (usePreviewStab) previewBuilder.setPreviewStabilizationEnabled(true)
+
             val preview = previewBuilder.build().also { it.setSurfaceProvider(v.surfaceProvider) }
 
             val cases = mutableListOf<UseCase>(preview)
@@ -368,7 +396,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 }
 
                 Mode.VIDEO -> {
-                    val caps = Recorder.getVideoCapabilities(info)
+                    val caps = videoCaps ?: Recorder.getVideoCapabilities(info)
                     val hdrOk = DynamicRange.HLG_10_BIT in caps.supportedDynamicRanges
                     val range = if (s.video.hdr && hdrOk) DynamicRange.HLG_10_BIT else DynamicRange.SDR
                     val qualities = caps.getSupportedQualities(range)
@@ -382,7 +410,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     }.build()
                     val vc = VideoCapture.Builder(recorder)
                         .setDynamicRange(range)
-                        .setVideoStabilizationEnabled(s.video.stab && caps.isStabilizationSupported)
+                        .setVideoStabilizationEnabled(useVideoStab)
                         .setTargetFrameRate(Range(fps, fps))
                         .setTargetRotation(rotation)
                         .build()
@@ -390,7 +418,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     cases += vc
                     newVideo = s.video.copy(
                         qualities = qualities, quality = q, fps = fps, fps60Ok = fps60,
-                        hdrOk = hdrOk, hdr = s.video.hdr && hdrOk, stabOk = caps.isStabilizationSupported,
+                        hdrOk = hdrOk, hdr = s.video.hdr && hdrOk, stabOk = previewStabOk || videoStabOk,
                     )
                 }
 
