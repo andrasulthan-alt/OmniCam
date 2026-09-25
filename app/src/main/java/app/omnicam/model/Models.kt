@@ -135,7 +135,8 @@ data class VideoUi(
     val fps60Ok: Boolean = false,
     val hdr: Boolean = false,
     val hdrOk: Boolean = false,
-    val stab: Boolean = true,
+    /** Off by default; the user opts in. */
+    val stab: Boolean = false,
     val stabOk: Boolean = false,
     val mic: Boolean = true,
 )
