@@ -140,7 +140,7 @@ fun VideoPanel(ui: CamUi, engine: CameraEngine, onMicToggle: (Boolean) -> Unit) 
         Chip("30 fps", v.fps == 30, enabled = !ui.recording) { engine.setVideoFps(30) }
         Chip("60 fps", v.fps == 60, enabled = v.fps60Ok && !ui.recording) { engine.setVideoFps(60) }
         Chip("HDR10 HLG", v.hdr, enabled = v.hdrOk && !ui.recording) { engine.setVideoHdr(!v.hdr) }
-        Chip("Stabilize", v.stab, enabled = v.stabOk && !ui.recording) { engine.setVideoStab(!v.stab) }
+        Chip("Stabilize", v.stab && v.stabOk, enabled = v.stabOk && !ui.recording) { engine.setVideoStab(!v.stab) }
         Chip(if (v.mic) "Mic on" else "Mic off", v.mic, enabled = !ui.recording) { onMicToggle(!v.mic) }
     }
 }
