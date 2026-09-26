@@ -99,6 +99,12 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     val settings by prefs.settings.collectAsState()
 
     var showSettings by remember { mutableStateOf(false) }
+    // Exposure bar: appears after tapping the viewfinder (like iPhone) and hides after a few seconds idle.
+    var evTouch by remember { mutableStateOf(0L) }
+    var showEvBar by remember { mutableStateOf(false) }
+    LaunchedEffect(evTouch) {
+        if (evTouch != 0L) { showEvBar = true; delay(3500); showEvBar = false }
+    }
     var showInfo by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
 
@@ -141,7 +147,9 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 .fillMaxWidth()
                 .aspectRatio(ratio)
                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                .pointerInput(Unit) { detectTapGestures(onTap = { engine.focusAt(it.x, it.y) }) }
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { engine.focusAt(it.x, it.y); evTouch = System.nanoTime() })
+                }
                 .pointerInput(Unit) { detectTransformGestures { _, _, zoom, _ -> if (zoom != 1f) engine.zoomBy(zoom) } },
         ) {
             if (whiteLightMode) Box(Modifier.fillMaxSize().background(Color.White))
@@ -159,6 +167,20 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
             }
             if (ui.mode == Mode.PRO) ScopeOverlay(frame, Modifier.fillMaxSize())
             if (!whiteLightMode) FocusRingView(ui, engine)
+
+            // iPhone-style brightness bar (PHOTO / VIDEO / SLO-MO; PRO has its own EV slider)
+            val evRanges = ui.ranges
+            val evModeOk = ui.mode == Mode.PHOTO || ui.mode.isVideo
+            if (evModeOk && !whiteLightMode && evRanges != null && evRanges.evSupported &&
+                evRanges.evMax > evRanges.evMin && (showEvBar || ui.ev != 0)
+            ) {
+                ExposureBar(
+                    ev = ui.ev, evMin = evRanges.evMin, evMax = evRanges.evMax, evStep = evRanges.evStep,
+                    onChange = { engine.setQuickEv(it) },
+                    onInteract = { evTouch = System.nanoTime() },
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+                )
+            }
 
             if (ui.mode == Mode.PRO && ui.scope.histogram) {
                 frame?.let {
