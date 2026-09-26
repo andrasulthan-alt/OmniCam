@@ -107,6 +107,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     val ui = MutableStateFlow(CamUi())
     val readout = MutableStateFlow(Readout())
     val scopeFrame = MutableStateFlow<ScopeFrame?>(null)
+    /** True for the brief moment the screen should show full white as a substitute flash. */
+    val screenFlashActive = MutableStateFlow(false)
 
     private val mainExec = ContextCompat.getMainExecutor(app)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -229,6 +231,11 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         p.availableCameraInfos.mapNotNull { info ->
             runCatching {
                 val c = Camera2CameraInfo.from(info)
+                val caps = c.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+                // Depth-only auxiliary sensors (ToF, etc.) lack BACKWARD_COMPATIBLE and cannot do normal
+                // photo/video; some devices expose them as extra camera IDs, so they must be filtered out
+                // here rather than assumed to already be excluded.
+                if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE)) return@mapNotNull null
                 val facing = c.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
                 val fl = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                     ?.firstOrNull()
@@ -413,6 +420,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         if (q != null) setQualitySelector(
                             QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q))
                         )
+                        targetBitrate(q, fps, range != DynamicRange.SDR)?.let { setTargetVideoEncodingBitRate(it) }
                     }.build()
                     val vc = VideoCapture.Builder(recorder)
                         .setDynamicRange(range)
@@ -450,7 +458,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             scopeAnalyzer.zebra = s.scope.zebra
             scopeAnalyzer.peaking = s.scope.peaking
             // Senter menyala terus hanya di VIDEO/QR; di FOTO/PRO memakai flash mode
-            cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
+            // enableTorch on a camera with no flash unit (e.g. most front cameras) fails silently; guard it.
+            if (cam.cameraInfo.hasFlashUnit()) {
+                cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
+            }
             applyManual()
             probeExtensions()
             return true
@@ -463,6 +474,26 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
+    }
+
+    /**
+     * Video bitrate targets at or slightly above flagship stock camera apps (measured on the Galaxy S20
+     * stock app: ~14 Mbps at 1080p30, ~21 at 1080p60, ~38 at 4K30, ~69 at 4K60). Without this, CameraX
+     * falls back to the device's encoder profile, which on some phones and custom ROMs is lower.
+     * More bits = fewer compression artifacts (blocky shadows, smeared fine detail), larger files.
+     */
+    private fun targetBitrate(q: Quality?, fps: Int, tenBit: Boolean): Int? {
+        val base = when (q) {
+            Quality.UHD -> 48_000_000
+            Quality.FHD -> 18_000_000
+            Quality.HD -> 10_000_000
+            Quality.SD -> 5_000_000
+            else -> return null
+        }
+        var b = base.toLong()
+        if (fps >= 60) b = b * 3 / 2
+        if (tenBit) b = b * 5 / 4
+        return b.coerceAtMost(100_000_000L).toInt()
     }
 
     /**
@@ -714,8 +745,11 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun toggleTorch() {
         val on = !ui.value.torch
         ui.update { it.copy(torch = on) }
-        camera?.cameraControl?.enableTorch(on)
+        if (camera?.cameraInfo?.hasFlashUnit() == true) camera?.cameraControl?.enableTorch(on)
     }
+
+    /** Cameras with no physical flash (typically front cameras) get a screen-as-flash toggle instead. */
+    fun toggleScreenFlash() { ui.update { it.copy(screenFlash = !it.screenFlash) } }
 
     fun cycleTimer() { ui.update { it.copy(timer = when (it.timer) { 0 -> 3; 3 -> 10; else -> 0 }) } }
     fun cycleBurst() { ui.update { it.copy(burst = when (it.burst) { 1 -> 3; 3 -> 5; 5 -> 10; else -> 1 }) } }
@@ -771,6 +805,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
         captureJob = scope.launch {
             val s0 = ui.value
+            // The front camera on most phones has no physical flash; light the subject with the
+            // screen instead. Only offered/used when the bound camera truly lacks a flash unit.
+            val useScreenFlash = s0.screenFlash && !s0.hasFlash
             ui.update { it.copy(busy = true) }
             try {
                 for (t in s0.timer downTo 1) {
@@ -778,6 +815,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     delay(1000)
                 }
                 ui.update { it.copy(countdown = 0) }
+                if (useScreenFlash) {
+                    screenFlashActive.value = true
+                    delay(250) // let the screen reach full brightness and auto-exposure adjust
+                }
                 if (s0.mode == Mode.PHOTO && s0.hdr && s0.extension == ExtensionMode.NONE) {
                     captureHdr(ic)
                     return@launch
@@ -787,6 +828,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     takeOne(ic, activeFormat)
                 }
             } finally {
+                screenFlashActive.value = false
                 ui.update { it.copy(busy = false, countdown = 0) }
             }
         }
