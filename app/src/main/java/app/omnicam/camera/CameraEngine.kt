@@ -36,6 +36,10 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.CameraEffect
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.effects.OverlayEffect
+import android.os.HandlerThread
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.ZoomState
@@ -441,7 +445,21 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             }
 
             p.unbindAll()
-            val cam = p.bindToLifecycle(o, selector, *cases.toTypedArray())
+            // 4K video: let Preview and VideoCapture share ONE camera stream (via a pass-through
+            // effect targeting both). The viewfinder then shows the same clean frames that go to the
+            // encoder, instead of a second full-size stream that some camera drivers (e.g. custom ROMs)
+            // corrupt with torn/smeared rows while recording.
+            // First attempt only; if the device rejects the shared stream, the retry binds normally.
+            val shareStream = withAnalysis && s.mode == Mode.VIDEO && newVideo.quality == Quality.UHD && videoCapture != null
+            val cam = if (shareStream) {
+                val group = UseCaseGroup.Builder().apply {
+                    cases.forEach { addUseCase(it) }
+                    addEffect(passThroughEffect())
+                }.build()
+                p.bindToLifecycle(o, selector, group)
+            } else {
+                p.bindToLifecycle(o, selector, *cases.toTypedArray())
+            }
             camera = cam
 
             observeZoom(cam)
@@ -474,6 +492,19 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
+    }
+
+    private var effectThread: HandlerThread? = null
+    private var effect: OverlayEffect? = null
+
+    /** An overlay effect that draws nothing; its only job is to make Preview + VideoCapture share one stream. */
+    private fun passThroughEffect(): OverlayEffect {
+        effect?.let { return it }
+        val t = effectThread ?: HandlerThread("omnicam-effect").also { it.start(); effectThread = it }
+        return OverlayEffect(
+            CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE, 0, Handler(t.looper),
+        ) { err -> toast("Preview effect error: ${err.message}") }
+            .also { e -> e.setOnDrawListener { true }; effect = e }
     }
 
     /**
