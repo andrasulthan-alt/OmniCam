@@ -194,6 +194,8 @@ data class CamUi(
     val hdr: Boolean = false,
     /** Screen-as-flash for photo capture, offered when the active camera has no physical flash (e.g. front camera). */
     val screenFlash: Boolean = false,
+    /** Quick brightness (exposure compensation index) for PHOTO/VIDEO, iPhone-style. PRO has its own. */
+    val ev: Int = 0,
 
     val manual: ManualState = ManualState(),
     val ranges: ManualRanges? = null,
