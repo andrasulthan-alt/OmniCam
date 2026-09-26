@@ -192,6 +192,8 @@ data class CamUi(
     val extensions: List<Int> = emptyList(),
     /** Built-in multi-frame HDR (PHOTO mode, no vendor extension needed). */
     val hdr: Boolean = false,
+    /** Screen-as-flash for photo capture, offered when the active camera has no physical flash (e.g. front camera). */
+    val screenFlash: Boolean = false,
 
     val manual: ManualState = ManualState(),
     val ranges: ManualRanges? = null,
