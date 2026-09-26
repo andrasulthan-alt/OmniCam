@@ -56,7 +56,7 @@ your device exposes, and use **Copy report** when filing a bug.
 ## Tested devices
 | Device | Android | Result |
 |---|---|---|
-| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work; 4K viewfinder fix confirmed. |
+| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work; 4K records a steady 30 fps (viewfinder tears while recording 4K, see known issues). |
 | Samsung Galaxy S20 Ultra (SM-G988B), stock One UI | 13 | Viewfinder reported blurry; fix pending confirmation (0.3.3). |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
@@ -67,10 +67,11 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   (`PERFORMANCE`) mode — reported as a blurry/pixelated live preview on a Galaxy S20 Ultra. OmniCam now defaults to
   `PERFORMANCE` and only switches to `COMPATIBLE` for the brief moments the preview is resized into the small corner
   thumbnail (front-camera white-light video mode). Not yet confirmed fixed on the reporter's device.
-- **4K viewfinder (e.g. Galaxy S9+ / Pixel Experience 13):** some camera drivers tear the viewfinder while recording 4K
-  (the saved video is clean). When recording 4K, OmniCam feeds the viewfinder from the recording stream through its own
-  minimal GL copy (CameraX stream sharing), which removes the tearing while aiming for a steady 30 fps. If a device rejects
-  this, OmniCam falls back to the normal two-stream path automatically.
+- **4K viewfinder on some custom ROMs (e.g. Galaxy S9+ / Pixel Experience 13):** the camera driver tears the viewfinder
+  while recording 4K; the saved video is clean and a steady 30 fps. Native Camera shows the same. Routing the viewfinder
+  through the recording stream (CameraX stream sharing, tried in 0.3.6 and with a minimal custom GL copy) removes the
+  tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
+  converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
   Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
 - Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
