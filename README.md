@@ -56,7 +56,7 @@ your device exposes, and use **Copy report** when filing a bug.
 ## Tested devices
 | Device | Android | Result |
 |---|---|---|
-| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work. See known issues. |
+| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work, including clean 4K recording (0.3.6). |
 | Samsung Galaxy S20 Ultra (SM-G988B), stock One UI | 13 | Viewfinder reported blurry; fix pending confirmation (0.3.3). |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
@@ -67,10 +67,10 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   (`PERFORMANCE`) mode — reported as a blurry/pixelated live preview on a Galaxy S20 Ultra. OmniCam now defaults to
   `PERFORMANCE` and only switches to `COMPATIBLE` for the brief moments the preview is resized into the small corner
   thumbnail (front-camera white-light video mode). Not yet confirmed fixed on the reporter's device.
-- **Galaxy S9+ on Pixel Experience 13:** while recording in 4K, the viewfinder showed smeared lines near the edges when the
-  phone moved; the saved 4K video was clean. Other Camera2 apps (e.g. Native Camera) show the same artifact on this ROM,
-  so it comes from the driver's second full-size stream. Since 0.3.6, 4K recording feeds the viewfinder from the same
-  stream as the recording (CameraX stream sharing), which should avoid it. Pending confirmation on the device.
+- **Fixed in 0.3.6 (confirmed on Galaxy S9+ / Pixel Experience 13):** while recording in 4K, the viewfinder showed smeared
+  lines near the edges when the phone moved, although the saved video was clean. Other Camera2 apps (e.g. Native Camera)
+  still show it on this ROM: it comes from the driver's second full-size stream. OmniCam now feeds the viewfinder from the
+  same stream as the recording (CameraX stream sharing).
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
   Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
 - Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
