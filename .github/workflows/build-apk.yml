@@ -7,11 +7,14 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    env:
+      # Signed, optimized release build when the signing key secrets exist; debug build otherwise (e.g. forks).
+      HAS_KEY: ${{ secrets.OMNICAM_KEYSTORE_B64 != '' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -25,10 +28,33 @@ jobs:
         with:
           gradle-version: 9.6.1
 
-      - name: Build debug APK
+      - name: Build signed release APK
+        if: env.HAS_KEY == 'true'
+        env:
+          OMNICAM_KEYSTORE_B64: ${{ secrets.OMNICAM_KEYSTORE_B64 }}
+          OMNICAM_KEYSTORE_PASSWORD: ${{ secrets.OMNICAM_KEYSTORE_PASSWORD }}
+          OMNICAM_KEY_ALIAS: ${{ secrets.OMNICAM_KEY_ALIAS }}
+          OMNICAM_KEY_PASSWORD: ${{ secrets.OMNICAM_KEY_PASSWORD }}
+        run: |
+          echo "$OMNICAM_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/omnicam.jks"
+          export OMNICAM_KEYSTORE_PATH="$RUNNER_TEMP/omnicam.jks"
+          gradle assembleRelease --stacktrace
+          rm -f "$RUNNER_TEMP/omnicam.jks"
+
+      - name: Upload release APK
+        if: env.HAS_KEY == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnicam-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Build debug APK (no signing key configured)
+        if: env.HAS_KEY != 'true'
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload debug APK
+        if: env.HAS_KEY != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: omnicam-debug-apk
