@@ -1,6 +1,8 @@
 # OmniCam
 
-A privacy-first, open-source camera app for Android. OmniCam combines ideas from Open Camera, GrapheneOS Camera,
+A privacy-first, open-source camera app for Android, built to get the most out of older phones' cameras:
+it uses every capability the camera reports (manual controls, RAW, high-speed video, variable aperture, OIS) and adds
+its own processing, such as built-in HDR, where custom ROMs lack the manufacturer's extensions. OmniCam combines ideas from Open Camera, GrapheneOS Camera,
 FreeDcam, Fossify Camera, MA Camera, Libre Camera and CameraX Info into one app. The code is written from scratch in
 Kotlin with Jetpack Compose, CameraX and Camera2 interop.
 
@@ -31,7 +33,9 @@ old one first. Your photos and videos stay in your gallery; only the app's setti
 | Zoom chips and lens picker (35 mm equivalent) | GrapheneOS Camera, MA Camera |
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
 | SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps), saved as slow-motion video | Open Camera |
+| Video bitrate set at or above stock camera apps (e.g. 18 Mbps at 1080p30, 48 Mbps at 4K30) instead of the device default | Open Camera |
 | Optical image stabilization kept on for photo and video when the lens has OIS | — |
+| Screen-as-flash for photo, and a bright white-screen light with a small live-preview corner while recording video, on cameras with no physical flash (typically the front camera) | Snapchat-style front flash |
 | Horizon level indicator | Open Camera |
 | Works as the camera for other apps (`IMAGE_CAPTURE` / `VIDEO_CAPTURE`) | Open Camera, Fossify, GrapheneOS Camera |
 | Camera info screen (hardware level, capabilities, sensor, RAW sizes, extensions) with a copyable report | CameraX Info |
@@ -51,15 +55,26 @@ your device exposes, and use **Copy report** when filing a bug.
 | Device | Android | Result |
 |---|---|---|
 | Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work. See known issues. |
+| Samsung Galaxy S20 Ultra (SM-G988B), stock One UI | 13 | Viewfinder reported blurry; fix pending confirmation (0.3.3). |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
 
 ## Known issues
+- **Fixed in 0.3.3:** the viewfinder previously rendered through `TextureView` (`ImplementationMode.COMPATIBLE`),
+  which is documented by Android to add an extra blending pass and can look softer than the default `SurfaceView`
+  (`PERFORMANCE`) mode — reported as a blurry/pixelated live preview on a Galaxy S20 Ultra. OmniCam now defaults to
+  `PERFORMANCE` and only switches to `COMPATIBLE` for the brief moments the preview is resized into the small corner
+  thumbnail (front-camera white-light video mode). Not yet confirmed fixed on the reporter's device.
 - **Galaxy S9+ on Pixel Experience 13:** while recording in 4K, the viewfinder shows smeared lines near the edges when the
   phone moves. The saved 4K video is not affected, and 1080p is clean. Other Camera2 apps (e.g. Native Camera) show the same
   artifact at 4K on this ROM, so it comes from the ROM's camera driver, not from OmniCam.
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
   Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
+- Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
+  processing (tuned noise reduction and sharpening, gyro stabilization such as Samsung Super Steady, HDR10+) that
+  Android does not expose to other apps. OmniCam matches what it can control, such as bitrate and OIS.
+- On phones with a depth-sensing auxiliary camera (used for portrait blur), that sensor is filtered out of the lens
+  picker: it cannot take a normal photo or video.
 - Built-in HDR corrects hand shake and removes most ghosts from moving subjects by falling back to the normal exposure
   where something moved. In very bright (clipped) areas movement cannot be detected, so faint ghosts are still possible
   there. Processing takes a few seconds on older phones.
@@ -70,6 +85,7 @@ Tested it on another device? Open an issue with the output of **Copy report**.
 - Choosing a save folder (SAF / SD card); honoring duration/size limits for `VIDEO_CAPTURE`
 - Direct access to physical cameras not exposed through CameraX
 - Night mode (multi-frame noise reduction); smarter HDR ghost handling in clipped highlights
+- Screen light auto-brightness matched to ambient darkness, instead of a fixed on/off toggle
 - RGB histogram / waveform, translations, automated tests
 - A permanent release signing key and a stable release
 
@@ -91,7 +107,7 @@ app/src/main/java/app/omnicam/
   camera/CameraInspector.kt   # camera info screen
   storage/Storage.kt          # preferences, MediaStore output, EXIF scrubbing, geotagging
   model/Models.kt             # UI state and helpers
-  ui/                         # CameraScreen, Panels, Components, SettingsAndInfo, Level
+  ui/                         # CameraScreen, Panels, Components, SettingsAndInfo, Level, ScreenLight (screen-as-flash)
 ```
 
 ## License
