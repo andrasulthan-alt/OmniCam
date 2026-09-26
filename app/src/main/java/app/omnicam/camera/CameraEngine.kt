@@ -120,6 +120,13 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private val io: ExecutorService = Executors.newSingleThreadExecutor()
     private val analysisExec: ExecutorService = Executors.newSingleThreadExecutor()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    // Camera2 slow-motion fallback (CameraX lacks high-speed profiles on some ROMs)
+    private val hs by lazy { HighSpeedRecorder(app) }
+    private var hsCaps: HighSpeedCaps? = null
+    private var hsSurface: android.view.Surface? = null
+    private var hsSurfaceSize: Size? = null
+    private var hsTicker: kotlinx.coroutines.Job? = null
     private val sound by lazy {
         MediaActionSound().also {
             it.load(MediaActionSound.SHUTTER_CLICK)
@@ -347,9 +354,17 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             }
             val info = p.getCameraInfo(selector)
 
-            val slowMoOk = runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
+            // Any previous Camera2 slow-motion session must release the camera before CameraX binds again
+            closeHighSpeed()
+            val cameraXSlowMo = runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
+            val c2Id = runCatching { Camera2CameraInfo.from(info).cameraId }.getOrNull()
+            val c2Caps = if (!cameraXSlowMo && c2Id != null && !extActive) {
+                HighSpeedRecorder.query(app.getSystemService(android.hardware.camera2.CameraManager::class.java), c2Id)
+            } else null
+            val slowMoOk = cameraXSlowMo || c2Caps != null
             if (s.mode == Mode.SLOWMO) {
-                if (slowMoOk && bindSlowMo(p, o, v, selector, info)) return true
+                if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
+                if (c2Caps != null) { enterCamera2SlowMo(p, c2Caps); return true }
                 toast("Slow motion is not supported by this camera")
                 ui.update { it.copy(mode = Mode.VIDEO, slowMoOk = false) }
                 return tryBind(p, o, v, withAnalysis)
@@ -476,6 +491,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     ranges = ranges, hasFlash = cam.cameraInfo.hasFlashUnit(),
                     qr = if (s.mode == Mode.QR) it.qr else null,
                     slowMoOk = slowMoOk,
+                    slowMo = it.slowMo.copy(camera2 = false),
                 )
             }
             scopeAnalyzer.histogram = s.scope.histogram
@@ -529,6 +545,94 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         if (fps >= 60) b = b * 3 / 2
         if (tenBit) b = b * 5 / 4
         return b.coerceAtMost(100_000_000L).toInt()
+    }
+
+    // ───────────────────────── Camera2 slow motion ─────────────────────────
+
+    private fun qualityFor(s: Size): Quality = when {
+        s.height >= 1080 || s.width >= 1920 -> Quality.FHD
+        s.height >= 720 || s.width >= 1280 -> Quality.HD
+        else -> Quality.SD
+    }
+
+    /** Switches from CameraX to OmniCam's own Camera2 high-speed recorder. The UI then shows a SurfaceView. */
+    private fun enterCamera2SlowMo(p: ProcessCameraProvider, caps: HighSpeedCaps) {
+        p.unbindAll()
+        camera = null
+        imageCapture = null
+        videoCapture = null
+        hsCaps = caps
+        val s = ui.value
+        val byQuality = LinkedHashMap<Quality, Size>()
+        caps.sizes.forEach { sz -> byQuality.putIfAbsent(qualityFor(sz), sz) }
+        val q = s.slowMo.quality?.takeIf { it in byQuality } ?: byQuality.keys.first()
+        val size = byQuality.getValue(q)
+        val rates = caps.ratesBySize[size].orEmpty()
+        val fps = s.slowMo.fps.takeIf { it in rates } ?: rates.last()
+        ui.update {
+            it.copy(
+                slowMo = SlowMoUi(byQuality.keys.toList(), q, rates, fps, camera2 = true, size = size),
+                slowMoOk = true, ranges = null, hasFlash = false, qr = null,
+            )
+        }
+        scopeFrame.value = null
+        openHighSpeedIfReady()
+    }
+
+    /** Called by the UI when the slow-motion SurfaceView (sized exactly to the stream) is ready or gone. */
+    fun onSlowMoSurface(surface: android.view.Surface?, width: Int = 0, height: Int = 0) {
+        hsSurface = surface
+        hsSurfaceSize = if (surface != null) Size(width, height) else null
+        if (surface == null) closeHighSpeed() else openHighSpeedIfReady()
+    }
+
+    private fun openHighSpeedIfReady() {
+        val s = ui.value
+        val caps = hsCaps ?: return
+        val surface = hsSurface ?: return
+        val size = s.slowMo.size ?: return
+        if (s.mode != Mode.SLOWMO || !s.slowMo.camera2) return
+        // High-speed sessions require the preview surface to match the stream size exactly
+        if (hsSurfaceSize != size) return
+        hs.open(caps.cameraId, size, s.slowMo.fps, surface,
+            onReady = {},
+            onError = { msg -> scope.launch { toast(msg) } },
+        )
+    }
+
+    private fun closeHighSpeed() {
+        hsTicker?.cancel()
+        hsTicker = null
+        if (hs.isRecording) {
+            val uri = hs.stopRecording()
+            ui.update { it.copy(recording = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
+        }
+        hs.close()
+    }
+
+    private fun toggleHighSpeedRecording() {
+        if (hs.isRecording) {
+            hsTicker?.cancel()
+            hsTicker = null
+            val uri = hs.stopRecording()
+            if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+            ui.update { it.copy(recording = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
+            if (uri == null) toast("Slow-motion recording failed")
+            return
+        }
+        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+        if (!hs.startRecording()) {
+            toast("Could not start slow-motion recording")
+            return
+        }
+        val t0 = SystemClock.elapsedRealtime()
+        ui.update { it.copy(recording = true, paused = false, recordedMs = 0) }
+        hsTicker = scope.launch {
+            while (true) {
+                ui.update { it.copy(recordedMs = SystemClock.elapsedRealtime() - t0) }
+                delay(250)
+            }
+        }
     }
 
     /**
@@ -738,14 +842,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     // ───────────────────────── kontrol umum ─────────────────────────
 
     fun setMode(m: Mode) {
-        if (recording != null || m == ui.value.mode) return
+        if (recording != null || hs.isRecording || m == ui.value.mode) return
         ui.update { it.copy(mode = m, torch = false, qr = null, manual = if (m == Mode.PRO) it.manual else it.manual.copy(exposureManual = false, focusManual = false, awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO, evIndex = 0)) }
         scopeFrame.value = null
         rebind()
     }
 
     fun flip() {
-        if (recording != null) return
+        if (recording != null || hs.isRecording) return
         ui.update { it.copy(front = !it.front, lensId = null, ev = 0) }
         rebind()
     }
@@ -1025,6 +1129,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
 
     private fun toggleRecording() {
+        if (ui.value.mode == Mode.SLOWMO && ui.value.slowMo.camera2) { toggleHighSpeedRecording(); return }
         val cur = recording
         if (cur != null) {
             cur.stop()
