@@ -30,14 +30,13 @@ androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", versi
 androidx-camera-video = { module = "androidx.camera:camera-video", version.ref = "camerax" }
 androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 androidx-camera-extensions = { module = "androidx.camera:camera-extensions", version.ref = "camerax" }
-androidx-camera-effects = { module = "androidx.camera:camera-effects", version.ref = "camerax" }
 
 kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
 
 [bundles]
 camerax = [
     "androidx-camera-core", "androidx-camera-camera2", "androidx-camera-lifecycle",
-    "androidx-camera-video", "androidx-camera-view", "androidx-camera-extensions", "androidx-camera-effects",
+    "androidx-camera-video", "androidx-camera-view", "androidx-camera-extensions",
 ]
 
 [plugins]
