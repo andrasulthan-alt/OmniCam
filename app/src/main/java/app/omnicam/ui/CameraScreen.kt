@@ -153,14 +153,20 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 .pointerInput(Unit) { detectTransformGestures { _, _, zoom, _ -> if (zoom != 1f) engine.zoomBy(zoom) } },
         ) {
             if (whiteLightMode) Box(Modifier.fillMaxSize().background(Color.White))
-            AndroidView(
-                factory = { previewView },
-                modifier = if (whiteLightMode) {
-                    Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = 12.dp)
-                        .size(112.dp).clip(RoundedCornerShape(16.dp))
-                        .border(2.dp, Color.Black.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
-                } else Modifier.fillMaxSize(),
-            )
+            val slowMoC2 = ui.mode == Mode.SLOWMO && ui.slowMo.camera2
+            val slowMoSize = ui.slowMo.size
+            if (slowMoC2 && slowMoSize != null) {
+                SlowMoSurface(slowMoSize, engine, Modifier.fillMaxSize())
+            } else {
+                AndroidView(
+                    factory = { previewView },
+                    modifier = if (whiteLightMode) {
+                        Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = 12.dp)
+                            .size(112.dp).clip(RoundedCornerShape(16.dp))
+                            .border(2.dp, Color.Black.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
+                    } else Modifier.fillMaxSize(),
+                )
+            }
             if (!whiteLightMode) {
                 GridOverlay(settings.grid, Modifier.fillMaxSize())
                 if (settings.level) LevelOverlay(Modifier.fillMaxSize())
@@ -186,7 +192,8 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 frame?.let {
                     HistogramView(
                         it.histogram,
-                        Modifier.align(Alignment.BottomEnd).padding(10.dp).size(width = 120.dp, height = 44.dp),
+                        Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = 10.dp)
+                            .size(width = 120.dp, height = 44.dp),
                     )
                 }
             }
@@ -194,7 +201,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 Text(
                     "ISO ${readout.iso}  ${app.omnicam.model.formatShutter(readout.expNs)}",
                     color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(10.dp)
+                    modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 64.dp, start = 10.dp)
                         .clip(RoundedCornerShape(6.dp)).background(PanelBg).padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
@@ -246,7 +253,8 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
             }
             if (ui.mode == Mode.PRO) ProPanel(ui, readout, engine)
 
-            if (ui.mode != Mode.QR) LensRow(ui, engine)
+            // Zoom/lens chips don't apply to the Camera2 slow-motion recorder (fixed high-speed stream)
+            if (ui.mode != Mode.QR && !(ui.mode == Mode.SLOWMO && ui.slowMo.camera2)) LensRow(ui, engine)
 
             // Rana
             Row(
