@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.camera.core.ImageCapture
 import androidx.camera.video.MediaStoreOutputOptions
@@ -108,6 +109,27 @@ object MediaOutput {
             .Builder(ctx.contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
             .setContentValues(values)
             .build()
+    }
+
+    /** A new, still-hidden (pending) video entry in DCIM/OmniCam plus a writable descriptor for it. */
+    fun newPendingVideo(ctx: Context, stamp: String, suffix: String): Pair<Uri, ParcelFileDescriptor>? {
+        val cr = ctx.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "VID_${stamp}_$suffix.mp4")
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, DIR)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        val fd = runCatching { cr.openFileDescriptor(uri, "rw") }.getOrNull()
+        if (fd == null) { runCatching { cr.delete(uri, null, null) }; return null }
+        return uri to fd
+    }
+
+    /** Makes a finished pending video visible in the gallery. */
+    fun finishPendingVideo(ctx: Context, uri: Uri) {
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+        runCatching { ctx.contentResolver.update(uri, values, null, null) }
     }
 
     /**
