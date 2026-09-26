@@ -86,6 +86,20 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     val ui by engine.ui.collectAsState()
     val readout by engine.readout.collectAsState()
     val frame by engine.scopeFrame.collectAsState()
+    val screenFlashActive by engine.screenFlashActive.collectAsState()
+    // Continuous "screen light": front camera has no torch, so brighten the screen instead
+    // while recording video with the light toggle on.
+    val screenLightOn = ui.front && !ui.hasFlash && ui.torch && ui.mode.isVideo
+    // Once recording actually starts, go further than just raising the backlight: turn the
+    // viewfinder itself into a bright white area (real light, not just backlight) and shrink the
+    // live feed to a small corner thumbnail so framing is still possible. Only while recording,
+    // since before that the full preview is more useful for lining up the shot.
+    val whiteLightMode = screenLightOn && ui.recording
+    LaunchedEffect(whiteLightMode) {
+        previewView.implementationMode = if (whiteLightMode) PreviewView.ImplementationMode.COMPATIBLE
+        else PreviewView.ImplementationMode.PERFORMANCE
+    }
+    ScreenBrightnessBoost(active = screenFlashActive || screenLightOn)
     val settings by prefs.settings.collectAsState()
 
     var showSettings by remember { mutableStateOf(false) }
@@ -95,7 +109,11 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     val previewView = remember {
         PreviewView(ctx).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            // PERFORMANCE (SurfaceView) is sharper and lower-latency than COMPATIBLE (TextureView),
+            // which renders through an extra blending pass. Switched to COMPATIBLE only for the brief
+            // moments the view is resized into the small corner thumbnail (white-light video mode, see
+            // below), since a resized/clipped SurfaceView is less reliable than a resized TextureView.
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         }
     }
 
@@ -130,11 +148,21 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 .pointerInput(Unit) { detectTapGestures(onTap = { engine.focusAt(it.x, it.y) }) }
                 .pointerInput(Unit) { detectTransformGestures { _, _, zoom, _ -> if (zoom != 1f) engine.zoomBy(zoom) } },
         ) {
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-            GridOverlay(settings.grid, Modifier.fillMaxSize())
-            if (settings.level) LevelOverlay(Modifier.fillMaxSize())
+            if (whiteLightMode) Box(Modifier.fillMaxSize().background(Color.White))
+            AndroidView(
+                factory = { previewView },
+                modifier = if (whiteLightMode) {
+                    Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 64.dp, end = 12.dp)
+                        .size(112.dp).clip(RoundedCornerShape(16.dp))
+                        .border(2.dp, Color.Black.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
+                } else Modifier.fillMaxSize(),
+            )
+            if (!whiteLightMode) {
+                GridOverlay(settings.grid, Modifier.fillMaxSize())
+                if (settings.level) LevelOverlay(Modifier.fillMaxSize())
+            }
             if (ui.mode == Mode.PRO) ScopeOverlay(frame, Modifier.fillMaxSize())
-            FocusRingView(ui, engine)
+            if (!whiteLightMode) FocusRingView(ui, engine)
 
             if (ui.mode == Mode.PRO && ui.scope.histogram) {
                 frame?.let {
@@ -170,7 +198,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
 
         // ───── Bar atas ─────
         TopBar(ui, engine, settings.grid.label, onSettings = { showSettings = true }, onInfo = { showInfo = true },
-            modifier = Modifier.align(Alignment.TopCenter))
+            modifier = Modifier.align(Alignment.TopCenter), onWhite = whiteLightMode)
 
         // ───── Kartu hasil QR ─────
         ui.qr?.let { hit ->
@@ -237,6 +265,11 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
         }
 
         SnackbarHost(snackbar, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 56.dp))
+
+        // Instant screen-as-flash for photo capture on cameras with no physical flash.
+        if (screenFlashActive) {
+            Box(Modifier.fillMaxSize().background(Color.White))
+        }
     }
 
     if (showSettings) {
@@ -265,9 +298,12 @@ private fun TopBar(
     onSettings: () -> Unit,
     onInfo: () -> Unit,
     modifier: Modifier,
+    onWhite: Boolean = false,
 ) {
     Row(
-        modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)
+        modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)
+            .let { if (onWhite) it.background(PanelBg, RoundedCornerShape(20.dp)) else it }
+            .padding(horizontal = 4.dp, vertical = if (onWhite) 4.dp else 0.dp)
             .horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -281,11 +317,19 @@ private fun TopBar(
                     else -> "⚡ Off"
                 }
                 Chip(label, ui.flash != ImageCapture.FLASH_MODE_OFF) { engine.cycleFlash() }
+            } else if (ui.front) {
+                // No physical flash on this camera (typical for a front camera): flash the screen instead.
+                Chip(if (ui.screenFlash) "💡 Screen flash: On" else "💡 Screen flash: Off", ui.screenFlash) {
+                    engine.toggleScreenFlash()
+                }
             }
             Chip(if (ui.timer == 0) "⏱ Off" else "⏱ ${ui.timer}s", ui.timer != 0) { engine.cycleTimer() }
             Chip(if (ui.burst == 1) "Burst 1" else "Burst ${ui.burst}", ui.burst != 1) { engine.cycleBurst() }
         } else if (ui.hasFlash) {
             Chip(if (ui.torch) "🔦 On" else "🔦 Off", ui.torch) { engine.toggleTorch() }
+        } else if (ui.front && ui.mode.isVideo) {
+            // Continuous fill light for front-camera video: brightens the screen instead of a torch.
+            Chip(if (ui.torch) "💡 Screen light: On" else "💡 Screen light: Off", ui.torch) { engine.toggleTorch() }
         }
         Chip("▦ $gridLabel", false, onClick = onSettings)
         Chip("⚙", false, onClick = onSettings)
