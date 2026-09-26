@@ -95,10 +95,6 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     // live feed to a small corner thumbnail so framing is still possible. Only while recording,
     // since before that the full preview is more useful for lining up the shot.
     val whiteLightMode = screenLightOn && ui.recording
-    LaunchedEffect(whiteLightMode) {
-        previewView.implementationMode = if (whiteLightMode) PreviewView.ImplementationMode.COMPATIBLE
-        else PreviewView.ImplementationMode.PERFORMANCE
-    }
     ScreenBrightnessBoost(active = screenFlashActive || screenLightOn)
     val settings by prefs.settings.collectAsState()
 
@@ -110,9 +106,9 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
         PreviewView(ctx).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
             // PERFORMANCE (SurfaceView) is sharper and lower-latency than COMPATIBLE (TextureView),
-            // which renders through an extra blending pass. Switched to COMPATIBLE only for the brief
-            // moments the view is resized into the small corner thumbnail (white-light video mode, see
-            // below), since a resized/clipped SurfaceView is less reliable than a resized TextureView.
+            // which renders through an extra blending pass that softens the viewfinder.
+            // (The implementation mode only takes effect on the next surface request, so it is set once
+            // here rather than switched while recording.)
             implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         }
     }
