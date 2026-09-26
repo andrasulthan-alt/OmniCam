@@ -14,8 +14,9 @@ Kotlin with Jetpack Compose, CameraX and Camera2 interop.
 ## Download
 Get the latest APK from [Releases](../../releases). Test builds are marked as *pre-release*.
 
-Test builds are signed with a temporary debug key. To move to a newer test build you may need to uninstall the
-old one first. Your photos and videos stay in your gallery; only the app's settings are reset.
+From 0.3.5 on, releases are optimized (R8) and signed with a permanent key, so future updates install over the
+previous version. Versions up to 0.3.4 were debug builds with a temporary key (installed as a separate app,
+package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay in your gallery.
 
 ## Features
 | Feature | Inspired by |
@@ -25,6 +26,7 @@ old one first. Your photos and videos stay in your gallery; only the app's setti
 | Strips GPS and device identifiers from JPEG EXIF; location off by default; permissions asked only when needed | GrapheneOS Camera |
 | Safe probing of vendor extensions (HDR / Night / Portrait / Retouch) | GrapheneOS Camera |
 | Manual ISO, shutter speed, focus, white balance presets, EV compensation | Open Camera, FreeDcam, Native Camera |
+| iPhone-style brightness bar in PHOTO/VIDEO: tap the viewfinder, drag the sun up or down; double-tap to reset (front and back cameras) | iOS Camera |
 | Aperture control on variable-aperture lenses (e.g. Galaxy S9/S9+: f/1.5 and f/2.4) in manual exposure | Native Camera |
 | Built-in HDR photo mode: 3 hand-held exposures (−2 / 0 / +2 EV), automatic alignment, ghost removal and exposure fusion. Works without vendor extensions | Camera Go, Open Camera |
 | RAW (DNG), RAW+JPEG, Ultra HDR (where the device supports them) | Open Camera, FreeDcam, Native Camera |
@@ -90,7 +92,9 @@ Tested it on another device? Open an issue with the output of **Copy report**.
 - A permanent release signing key and a stable release
 
 ## Building
-**GitHub Actions:** every push runs the *Build APK* workflow. Download the `omnicam-debug-apk` artifact from the run page.
+**GitHub Actions:** every push runs the *Build APK* workflow. With the signing secrets configured
+(`OMNICAM_KEYSTORE_B64`, `OMNICAM_KEYSTORE_PASSWORD`, `OMNICAM_KEY_ALIAS`, `OMNICAM_KEY_PASSWORD`) it produces a signed,
+optimized `omnicam-release-apk`; without them (e.g. in forks) it falls back to `omnicam-debug-apk`.
 Forks: open the *Actions* tab and enable workflows first.
 
 **Android Studio:** open the project, let Gradle sync, then *Build → Build APK(s)*. Output: `app/build/outputs/apk/debug/`.
