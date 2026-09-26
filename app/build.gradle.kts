@@ -11,15 +11,33 @@ android {
         applicationId = "app.omnicam"
         minSdk = 30          // Android 11+: zoom ratio API, MediaStore relative path, modern Camera2
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.3.4"
+        versionCode = 10
+        versionName = "0.3.5"
+        // Real phones only: drops the x86/x86_64 emulator copies of CameraX's small native helper.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+    }
+
+    // Permanent release key, supplied by CI from GitHub Secrets (never committed to the repo).
+    // With the same key every release, updates install over the previous version.
+    val keystorePath: String? = System.getenv("OMNICAM_KEYSTORE_PATH")
+    signingConfigs {
+        create("release") {
+            if (keystorePath != null) {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("OMNICAM_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("OMNICAM_KEY_ALIAS")
+                keyPassword = System.getenv("OMNICAM_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
+            // R8: removes unused code from Compose/CameraX and optimizes the rest (much smaller, faster APK)
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (keystorePath != null) signingConfig = signingConfigs.getByName("release")
         }
         debug {
             applicationIdSuffix = ".dev"
@@ -28,6 +46,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // Do not embed the Google-encrypted dependency metadata block (not needed; F-Droid friendly).
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 }
 
