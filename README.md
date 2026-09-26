@@ -67,9 +67,10 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   (`PERFORMANCE`) mode — reported as a blurry/pixelated live preview on a Galaxy S20 Ultra. OmniCam now defaults to
   `PERFORMANCE` and only switches to `COMPATIBLE` for the brief moments the preview is resized into the small corner
   thumbnail (front-camera white-light video mode). Not yet confirmed fixed on the reporter's device.
-- **Galaxy S9+ on Pixel Experience 13:** while recording in 4K, the viewfinder shows smeared lines near the edges when the
-  phone moves. The saved 4K video is not affected, and 1080p is clean. Other Camera2 apps (e.g. Native Camera) show the same
-  artifact at 4K on this ROM, so it comes from the ROM's camera driver, not from OmniCam.
+- **Galaxy S9+ on Pixel Experience 13:** while recording in 4K, the viewfinder showed smeared lines near the edges when the
+  phone moved; the saved 4K video was clean. Other Camera2 apps (e.g. Native Camera) show the same artifact on this ROM,
+  so it comes from the driver's second full-size stream. Since 0.3.6, 4K recording feeds the viewfinder from the same
+  stream as the recording (CameraX stream sharing), which should avoid it. Pending confirmation on the device.
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
   Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
 - Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
