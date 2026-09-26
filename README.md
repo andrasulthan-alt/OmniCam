@@ -34,7 +34,7 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Timer (3/10 s), burst (3/5/10), grids (3×3, 4×4, golden), volume keys as shutter | Open Camera, Fossify, Libre Camera |
 | Zoom chips and lens picker (35 mm equivalent) | GrapheneOS Camera, MA Camera |
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
-| SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps), saved as slow-motion video | Open Camera |
+| SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps), saved as slow-motion video. Falls back to OmniCam's own Camera2 high-speed recorder when CameraX lacks the ROM's high-speed profiles (e.g. custom ROMs) | Open Camera |
 | Video bitrate set at or above stock camera apps (e.g. 18 Mbps at 1080p30, 48 Mbps at 4K30) instead of the device default | Open Camera |
 | Optical image stabilization kept on for photo and video when the lens has OIS | — |
 | Screen-as-flash for photo, and a bright white-screen light with a small live-preview corner while recording video, on cameras with no physical flash (typically the front camera) | Snapchat-style front flash |
@@ -109,6 +109,7 @@ app/src/main/java/app/omnicam/
   ExternalCapture.kt          # IMAGE_CAPTURE / VIDEO_CAPTURE for other apps
   camera/CameraEngine.kt      # CameraX binding, photo/video, manual controls, extensions
   camera/Analyzers.kt         # histogram / zebra / peaking and QR scanner
+  camera/HighSpeedRecorder.kt # Camera2 constrained high-speed slow-motion recorder (fallback)
   camera/HdrProcessor.kt      # built-in HDR: frame alignment (MTB) + exposure fusion
   camera/CameraInspector.kt   # camera info screen
   storage/Storage.kt          # preferences, MediaStore output, EXIF scrubbing, geotagging
