@@ -104,6 +104,9 @@ import kotlin.math.roundToInt
  *  QR       : Preview + ImageAnalysis
  */
 @OptIn(ExperimentalCamera2Interop::class)
+/** See the comment at the stream-sharing decision in tryBind(). */
+private const val SHARE_4K_STREAM = false
+
 class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     val ui = MutableStateFlow(CamUi())
@@ -448,7 +451,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             // encoder, instead of a second full-size stream that some camera drivers (e.g. custom ROMs)
             // corrupt with torn/smeared rows while recording.
             // First attempt only; if the device rejects the shared stream, the retry binds normally.
-            val shareStream = withAnalysis && s.mode == Mode.VIDEO && newVideo.quality == Quality.UHD && videoCapture != null
+            // Disabled: measured on a Galaxy S9+ (Exynos 9810), routing 4K through the GPU (both CameraX's
+            // OverlayEffect and OmniCam's minimal PassThroughEffect) drops the recording to ~24 fps, while the
+            // plain two-stream path records a steady 30 fps. A smooth recording matters more than a clean
+            // viewfinder, so 4K uses the plain path. PassThroughEffect is kept for future per-device use.
+            val shareStream = SHARE_4K_STREAM && withAnalysis && s.mode == Mode.VIDEO &&
+                newVideo.quality == Quality.UHD && videoCapture != null
             val cam = if (shareStream) {
                 val group = UseCaseGroup.Builder().apply {
                     cases.forEach { addUseCase(it) }
