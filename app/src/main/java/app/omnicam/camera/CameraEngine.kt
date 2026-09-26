@@ -38,8 +38,6 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.CameraEffect
 import androidx.camera.core.UseCaseGroup
-import androidx.camera.effects.OverlayEffect
-import android.os.HandlerThread
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCase
 import androidx.camera.core.ZoomState
@@ -494,17 +492,15 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
     }
 
-    private var effectThread: HandlerThread? = null
-    private var effect: OverlayEffect? = null
+    private var effect: PassThroughEffect? = null
 
-    /** An overlay effect that draws nothing; its only job is to make Preview + VideoCapture share one stream. */
-    private fun passThroughEffect(): OverlayEffect {
+    /** A minimal GL copy whose only job is to make Preview + VideoCapture share one camera stream. */
+    private fun passThroughEffect(): PassThroughEffect {
         effect?.let { return it }
-        val t = effectThread ?: HandlerThread("omnicam-effect").also { it.start(); effectThread = it }
-        return OverlayEffect(
-            CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE, 0, Handler(t.looper),
-        ) { err -> toast("Preview effect error: ${err.message}") }
-            .also { e -> e.setOnDrawListener { true }; effect = e }
+        val proc = PassThroughProcessor { err -> toast("Preview pipeline error: ${err.message}") }
+        return PassThroughEffect(CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE, proc) { err ->
+            toast("Preview pipeline error: ${err.message}")
+        }.also { effect = it }
     }
 
     /**
