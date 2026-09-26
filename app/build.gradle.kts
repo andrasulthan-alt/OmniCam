@@ -11,8 +11,8 @@ android {
         applicationId = "app.omnicam"
         minSdk = 30          // Android 11+: zoom ratio API, MediaStore relative path, modern Camera2
         targetSdk = 37
-        versionCode = 10
-        versionName = "0.3.5"
+        versionCode = 11
+        versionName = "0.3.6"
         // Real phones only: drops the x86/x86_64 emulator copies of CameraX's small native helper.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
