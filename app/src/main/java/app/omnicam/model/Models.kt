@@ -24,6 +24,10 @@ data class SlowMoUi(
     val quality: Quality? = null,
     val rates: List<Int> = emptyList(),
     val fps: Int = 0,
+    /** True when recording through OmniCam's own Camera2 high-speed recorder instead of CameraX. */
+    val camera2: Boolean = false,
+    /** Camera2 path: exact high-speed stream size (landscape) the preview surface must use. */
+    val size: android.util.Size? = null,
 )
 
 enum class PhotoFormat(val label: String, val outputFormat: Int) {
