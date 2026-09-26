@@ -610,7 +610,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     ).build()
                 )
             } else c2.clearCaptureRequestOptions()
-            cam.cameraControl.setExposureCompensationIndex(0)
+            val q = if (r != null && r.evSupported) s.ev.coerceIn(r.evMin, r.evMax) else 0
+            cam.cameraControl.setExposureCompensationIndex(q)
             return
         }
         val m = s.manual
@@ -668,6 +669,16 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun setIso(iso: Int) { ui.update { it.copy(manual = it.manual.copy(iso = iso)) }; applyManual() }
     fun setExposureNs(ns: Long) { ui.update { it.copy(manual = it.manual.copy(exposureNs = ns)) }; applyManual() }
     fun setEv(index: Int) { ui.update { it.copy(manual = it.manual.copy(evIndex = index)) }; applyManual() }
+
+    /** iPhone-style brightness for PHOTO/VIDEO/SLO-MO: exposure compensation on top of auto exposure. */
+    fun setQuickEv(index: Int) {
+        val r = ui.value.ranges ?: return
+        if (!r.evSupported) return
+        val i = index.coerceIn(r.evMin, r.evMax)
+        if (i == ui.value.ev) return
+        ui.update { it.copy(ev = i) }
+        camera?.cameraControl?.setExposureCompensationIndex(i)
+    }
     fun setAwb(mode: Int) { ui.update { it.copy(manual = it.manual.copy(awbMode = mode)) }; applyManual() }
     fun setAperture(f: Float) { ui.update { it.copy(manual = it.manual.copy(aperture = f)) }; applyManual() }
 
@@ -700,7 +711,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun flip() {
         if (recording != null) return
-        ui.update { it.copy(front = !it.front, lensId = null) }
+        ui.update { it.copy(front = !it.front, lensId = null, ev = 0) }
         rebind()
     }
 
@@ -897,7 +908,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             return
         }
         val steps = (2f / r.evStep).roundToInt().coerceAtLeast(1)
-        val indices = listOf(0, max(r.evMin, -steps), min(r.evMax, steps)).distinct()
+        // Bracket around the user's chosen brightness (0 unless they dragged the exposure bar)
+        val base = ui.value.ev.coerceIn(r.evMin, r.evMax)
+        val indices = listOf(base, max(r.evMin, base - steps), min(r.evMax, base + steps)).distinct()
         if (indices.size < 2) {
             toast("HDR is not available with this camera's exposure range")
             return
@@ -920,7 +933,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 rotationDeg = shot.second
             }
         } finally {
-            runCatching { cam.cameraControl.setExposureCompensationIndex(0) }
+            runCatching { cam.cameraControl.setExposureCompensationIndex(ui.value.ev) }
         }
         toast("Processing HDR…")
         val uri = withContext(Dispatchers.Default) {
