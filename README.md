@@ -35,6 +35,8 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Zoom chips and lens picker (35 mm equivalent) | GrapheneOS Camera, MA Camera |
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
 | SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps) with OmniCam's own Camera2 recorder (falls back to the older high-speed session API some drivers need, and waits for the camera to be released before switching modes), saved as slow-motion video | FreeDcam, Open Camera |
+| TIME-LAPSE mode, iPhone-style: one button, no settings. Speed starts at 15x and doubles automatically the longer you record, so the finished clip stays about 20–40 s at a uniform speed (frames are all-intra, so older frames can be thinned without re-encoding). Smooth by design: digital stabilisation (global motion from the median of 3x3 tiles, smoothed camera path, moving crop), deflicker (weighted moving average of brightness), and focus/white balance locked while recording | iOS Camera, vid.stab, timelapse-deflicker |
+| D3D mode (3D photo, OmniCam's take on Dazz Cam's D3D): one tap takes a photo, then the phone's depth sensor (ToF, Camera2 DEPTH_OUTPUT) is read, and the photo is turned into a looping clip where near and far parts move differently around the subject. No AI. Shown only on phones with a back depth camera (e.g. Galaxy S20+/Ultra, Note10+) | Dazz Cam |
 | Video bitrate set at or above stock camera apps (e.g. 18 Mbps at 1080p30, 48 Mbps at 4K30) instead of the device default | Open Camera |
 | Optical image stabilization kept on for photo and video when the lens has OIS | — |
 | Screen-as-flash for photo, and a bright white-screen light with a small live-preview corner while recording video, on cameras with no physical flash (typically the front camera) | Snapchat-style front flash |
@@ -105,7 +107,11 @@ Google's [android/camera-samples](https://github.com/android/camera-samples) (Ca
 [FreeDcam](https://github.com/KillerInk/FreeDcam) (vendor quirks, high-speed sessions),
 [LineageOS Aperture](https://github.com/LineageOS/android_packages_apps_Aperture) (CameraX on many devices),
 [GrapheneOS Camera](https://github.com/GrapheneOS/Camera), [Fossify Camera](https://github.com/FossifyOrg/Camera),
-[MotionCam](https://github.com/mirsadm/motioncam) and CameraX Info.
+[MotionCam](https://github.com/mirsadm/motioncam), CameraX Info, and for time-lapse encoding
+[Grafika](https://github.com/google/grafika) and [TimeLapseRecordingSample](https://github.com/saki4510t/TimeLapseRecordingSample) (Apache-2.0);
+for smooth time-lapses [timelapse-deflicker](https://github.com/cyberang3l/timelapse-deflicker) (GPL-3.0),
+[Karry/TimeLapse](https://github.com/Karry/TimeLapse) (weighted-moving-average deflicker) and the path-smoothing idea of
+[vid.stab](https://github.com/georgmartius/vid.stab).
 
 ## Building
 **GitHub Actions:** every push runs the *Build APK* workflow. With the signing secrets configured
@@ -123,7 +129,9 @@ app/src/main/java/app/omnicam/
   ExternalCapture.kt          # IMAGE_CAPTURE / VIDEO_CAPTURE for other apps
   camera/CameraEngine.kt      # CameraX binding, photo/video, manual controls, extensions
   camera/Analyzers.kt         # histogram / zebra / peaking and QR scanner
-  camera/HighSpeedRecorder.kt # Camera2 constrained high-speed slow-motion recorder (fallback)
+  camera/HighSpeedRecorder.kt # Camera2 constrained high-speed slow-motion recorder
+  camera/TimelapseRecorder.kt # automatic time-lapse: frame sampling, all-intra encoding, uniform thinning
+  camera/DepthCamera.kt       # D3D: depth-camera detection, DEPTH16 capture, depth-based parallax clip
   camera/HdrProcessor.kt      # built-in HDR: frame alignment (MTB) + exposure fusion
   camera/CameraInspector.kt   # camera info screen
   storage/Storage.kt          # preferences, MediaStore output, EXIF scrubbing, geotagging
