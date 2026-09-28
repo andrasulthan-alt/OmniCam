@@ -44,8 +44,6 @@ import androidx.camera.core.ZoomState
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.extensions.ExtensionMode
-import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.HighSpeedVideoSessionConfig
@@ -84,7 +82,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import app.omnicam.model.extensionLabel
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -108,11 +105,6 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalCamera2Interop::class)
 /** See the comment at the stream-sharing decision in tryBind(). */
 private const val SHARE_4K_STREAM = false
-
-/** Vendor extension safety net (see CameraEngine.extBrokenKey). */
-private const val EXT_PENDING = "ext_pending"
-private const val EXT_START_TIMEOUT_MS = 5_000L
-private const val EXT_CAPTURE_TIMEOUT_MS = 25_000L
 
 /** Slow motion: gap after CameraX releases the camera, and the delay before an automatic retry. */
 private const val HS_OPEN_GAP_MS = 600L
@@ -163,18 +155,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun slowMoBrokenKey(cameraId: String) = "slowmo_broken_${cameraId}_v$appVersion"
     private fun slowMoCompatKey(cameraId: String) = "slowmo_compat_${cameraId}_v$appVersion"
 
-    // ── Vendor extension (HDR/Night/Portrait...) safety net ──
-    // Some vendor extension libraries advertise a mode that then hangs the camera session or the
-    // capture, on phones nobody here can test. Every failure is remembered per camera and per app
-    // version, and that mode is simply no longer offered on that phone:
-    //  - the viewfinder must start streaming within a few seconds of enabling the mode;
-    //  - a photo in that mode must finish within a generous timeout;
-    //  - a marker is written before starting the mode or a capture and removed once it worked, so a
-    //    hard freeze or crash (the app is closed and reopened) is also detected on the next start.
-    private fun extBrokenKey(sel: String, mode: Int) = "ext_broken_${sel}_${mode}_v$appVersion"
-    private fun extBroken(sel: String, mode: Int) = quirks.getBoolean(extBrokenKey(sel, mode), false)
-    private var extActiveNow = false
-    private var extWatchdog: kotlinx.coroutines.Job? = null
     private val sound by lazy {
         MediaActionSound().also {
             it.load(MediaActionSound.SHUTTER_CLICK)
@@ -185,7 +165,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     private var started = false
     private var provider: ProcessCameraProvider? = null
-    private var extMgr: ExtensionsManager? = null
     private var owner: LifecycleOwner? = null
     private var previewView: PreviewView? = null
     private var camera: Camera? = null
@@ -197,7 +176,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private var zoomObserver: Observer<ZoomState>? = null
     private var rotation = Surface.ROTATION_0
     private var activeFormat = PhotoFormat.JPEG
-    private val extCache = ConcurrentHashMap<String, Boolean>()
 
     private val scopeAnalyzer = ScopeAnalyzer { scopeFrame.value = it }
     private var lastQrText: String? = null
@@ -255,13 +233,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 return@addListener
             }
             provider = p
-            val ef = ExtensionsManager.getInstanceAsync(app, p)
-            ef.addListener({
-                extMgr = try { ef.get() } catch (_: Exception) { null }
-                recoverPendingExtension()
-                ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
-                rebind()
-            }, mainExec)
+            // Vendor extensions (HDR/Night/Portrait) were removed in 0.4.3: on tested Samsung phones they froze
+            // the camera even with the phone's own settings. PHOTO uses the phone's normal processing.
+            ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
+            rebind()
         }, mainExec)
     }
 
@@ -327,97 +302,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     private fun selectorKey(s: CamUi) = "${s.front}|${s.lensId}"
 
-    // ───────────────────────── ekstensi (HDR/Malam/Potret) ─────────────────────────
-
-    /**
-     * Beberapa vendor mengiklankan ekstensi lalu crash saat di-bind. getCameraInfo() melakukan
-     * inisialisasi vendor yang sama dengan bindToLifecycle(), jadi dipakai sebagai probe aman.
-     */
-    private fun probeExtensions() {
-        val p = provider ?: return
-        val em = extMgr ?: return
-        val s = ui.value
-        val base = baseSelector(s)
-        val key = selectorKey(s)
-        io.execute {
-            val modes = listOf(
-                ExtensionMode.AUTO, ExtensionMode.HDR, ExtensionMode.NIGHT,
-                ExtensionMode.BOKEH, ExtensionMode.FACE_RETOUCH,
-            )
-            val usable = modes.filter { m ->
-                val ck = "$key:$m"
-                val cached = extCache[ck]
-                if (extBroken(key, m)) return@filter false
-                val verdict: Boolean? = cached ?: probeOne(p, em, base, m)
-                if (cached == null && verdict != null) extCache[ck] = verdict
-                verdict == true
-            }
-            mainHandler.post {
-                if (selectorKey(ui.value) == key) {
-                    ui.update {
-                        it.copy(
-                            extensions = usable,
-                            extension = if (it.extension in usable) it.extension else ExtensionMode.NONE,
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    /** true/false = verdict tetap (boleh di-cache); null = gagal sementara. */
-    private fun probeOne(p: ProcessCameraProvider, em: ExtensionsManager, base: CameraSelector, mode: Int): Boolean? =
-        try {
-            if (!em.isExtensionAvailable(base, mode)) {
-                false
-            } else {
-                p.getCameraInfo(em.getExtensionEnabledCameraSelector(base, mode))
-                true
-            }
-        } catch (_: UnsupportedOperationException) {
-            false
-        } catch (_: Exception) {
-            null
-        }
-
-    /**
-     * The app was closed (crash, freeze, force stop) while a vendor mode was starting or taking a
-     * photo: that mode is not offered again on this phone.
-     */
-    private fun recoverPendingExtension() {
-        val k = quirks.getString(EXT_PENDING, null) ?: return
-        quirks.edit().putBoolean(k, true).remove(EXT_PENDING).apply()
-        toast("A camera mode stopped responding last time and has been turned off on this phone")
-    }
-
-    /** The viewfinder must actually stream in a vendor mode; otherwise the mode is turned off. */
-    private fun startExtensionWatchdog(sel: String, mode: Int) {
-        extWatchdog?.cancel()
-        val pv = previewView ?: return
-        extWatchdog = scope.launch {
-            delay(500)   // let the view drop the previous session's state first
-            val ok = withTimeoutOrNull(EXT_START_TIMEOUT_MS) {
-                while (pv.previewStreamState.value != PreviewView.StreamState.STREAMING) delay(100)
-                true
-            } == true
-            if (!extActiveNow || ui.value.extension != mode || selectorKey(ui.value) != sel) return@launch
-            // App sent to the background meanwhile: the viewfinder stops for that reason, not a vendor fault
-            val resumed = owner?.lifecycle?.currentState?.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) == true
-            if (!resumed) { quirks.edit().remove(EXT_PENDING).apply(); return@launch }
-            if (ok) quirks.edit().remove(EXT_PENDING).apply()
-            else disableExtension(sel, mode, "${extensionLabel(mode)} does not start on this phone")
-        }
-    }
-
-    private fun disableExtension(sel: String, mode: Int, why: String) {
-        extWatchdog?.cancel()
-        quirks.edit().putBoolean(extBrokenKey(sel, mode), true).remove(EXT_PENDING).apply()
-        extCache["$sel:$mode"] = false
-        toast("$why. Switched to Std.")
-        ui.update { it.copy(extension = ExtensionMode.NONE, extensions = it.extensions - mode) }
-        mainHandler.post { rebind() }
-    }
-
     // ───────────────────────── binding ─────────────────────────
 
     fun rebind() {
@@ -443,19 +327,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     private fun tryBind(p: ProcessCameraProvider, o: LifecycleOwner, v: PreviewView, withAnalysis: Boolean): Boolean {
         val s = ui.value
-        var extTried = false
         try {
             val base = baseSelector(s)
-            var selector = base
-            var extActive = false
-            val em = extMgr
-            if (s.mode == Mode.PHOTO && s.extension != ExtensionMode.NONE && em != null &&
-                extCache["${selectorKey(s)}:${s.extension}"] == true && !extBroken(selectorKey(s), s.extension)
-            ) {
-                extTried = true
-                selector = em.getExtensionEnabledCameraSelector(base, s.extension)
-                extActive = true
-            }
+            val selector = base
             val info = p.getCameraInfo(selector)
 
             // Any previous Camera2 slow-motion session must release the camera before CameraX binds again
@@ -466,7 +340,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             // afterwards (and SLO-MO then reported "not supported") until the app was restarted.
             val c2Id = runCatching { Camera2CameraInfo.from(info).cameraId }.getOrNull()
             val slowMoBroken = c2Id != null && quirks.getBoolean(slowMoBrokenKey(c2Id), false)
-            val c2Caps = if (c2Id != null && !extActive && !slowMoBroken) {
+            val c2Caps = if (c2Id != null && !slowMoBroken) {
                 HighSpeedRecorder.query(app.getSystemService(android.hardware.camera2.CameraManager::class.java), c2Id)
             } else null
             // A camera already known to fail high speed is not retried through CameraX either
@@ -496,7 +370,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
             val previewBuilder = Preview.Builder()
                 .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
-            if (!extActive) Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCb)
+            Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCb)
             if (usePreviewStab) previewBuilder.setPreviewStabilizationEnabled(true)
 
             val preview = previewBuilder.build().also { it.setSurfaceProvider(v.surfaceProvider) }
@@ -511,8 +385,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             when (s.mode) {
                 Mode.PHOTO, Mode.PRO -> {
                     val supported = ImageCapture.getImageCaptureCapabilities(info).supportedOutputFormats
-                    // Vendor modes only get plain JPEG: they process the photo themselves
-                    val allowed = if (extActive) listOf(PhotoFormat.JPEG) else PhotoFormat.entries.filter { f ->
+                    val allowed = PhotoFormat.entries.filter { f ->
                         f.outputFormat in supported && (s.mode == Mode.PRO || !f.hasRaw)
                     }.ifEmpty { listOf(PhotoFormat.JPEG) }
                     newFormats = allowed
@@ -529,18 +402,13 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                             else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                         )
                         .setOutputFormat(newFormat.outputFormat)
-                        // Vendor modes: the default size choice, like Google's extension sample and
-                        // GrapheneOS Camera. Forcing the largest sensor size is outside what many vendor
-                        // libraries are built for.
-                        .setResolutionSelector(
-                            if (extActive) ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build() else highRes
-                        )
+                        .setResolutionSelector(highRes)
                         .setFlashMode(s.flash)
                         .setTargetRotation(rotation)
                         .build()
                     imageCapture = ic
                     cases += ic
-                    if (s.mode == Mode.PRO && withAnalysis && !extActive) {
+                    if (s.mode == Mode.PRO && withAnalysis) {
                         cases += buildAnalysis(scopeAnalyzer, Size(640, 480))
                     }
                 }
@@ -593,17 +461,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 }
             }
 
-            if (extActive) {
-                // Vendor libraries only accept the capture settings they list; do not carry OmniCam's own
-                // settings (forced OIS, brightness) from the previous session into the vendor session.
-                camera?.let { old ->
-                    runCatching { Camera2CameraControl.from(old.cameraControl).clearCaptureRequestOptions() }
-                    runCatching { old.cameraControl.setExposureCompensationIndex(0) }
-                }
-                quirks.edit().putString(EXT_PENDING, extBrokenKey(selectorKey(s), s.extension)).commit()
-            }
-            extActiveNow = false
-            extWatchdog?.cancel()
             p.unbindAll()
             // 4K video: let Preview and VideoCapture share ONE camera stream (via a pass-through
             // effect targeting both). The viewfinder then shows the same clean frames that go to the
@@ -626,13 +483,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 p.bindToLifecycle(o, selector, *cases.toTypedArray())
             }
             camera = cam
-            extActiveNow = extActive
-            if (extActive) startExtensionWatchdog(selectorKey(s), s.extension)
-            else quirks.edit().remove(EXT_PENDING).apply()   // a normal session came up: nothing hung
 
             observeZoom(cam)
-            // In a vendor mode the brightness bar is hidden: exposure compensation is often not allowed there
-            val ranges = readRanges(cam).let { if (extActive) it.copy(evSupported = false) else it }
+            val ranges = readRanges(cam)
             ui.update {
                 it.copy(
                     formats = newFormats, format = newFormat, video = newVideo,
@@ -651,22 +504,13 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
             }
             applyManual()
-            probeExtensions()
             return true
         } catch (e: IllegalArgumentException) {
-            if (extTried) {
-                disableExtension(selectorKey(s), s.extension, "${extensionLabel(s.extension)} is not supported here")
-                return true
-            }
             if (withAnalysis && s.mode == Mode.PRO) {
                 toast("This format + overlay combination is not supported; histogram/zebra turned off.")
             } else toast("Camera configuration not supported: ${e.message}")
             return false
         } catch (e: Exception) {
-            if (extTried) {
-                disableExtension(selectorKey(s), s.extension, "${extensionLabel(s.extension)} failed to start")
-                return true
-            }
             toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
@@ -713,8 +557,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     /** Switches from CameraX to OmniCam's own Camera2 high-speed recorder. The UI then shows a SurfaceView. */
     private fun enterCamera2SlowMo(p: ProcessCameraProvider, caps: HighSpeedCaps) {
-        extActiveNow = false
-        extWatchdog?.cancel()
         p.unbindAll()
         cameraXReleasedAt = SystemClock.elapsedRealtime()
         hsOpenRetried = false
@@ -1014,7 +856,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     private fun applyManual() {
         val cam = camera ?: return
-        if (extActiveNow) return   // vendor session: only its own settings (see tryBind)
         val s = ui.value
         val c2 = Camera2CameraControl.from(cam.cameraControl)
         val r = s.ranges
@@ -1095,7 +936,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val i = index.coerceIn(r.evMin, r.evMax)
         if (i == ui.value.ev) return
         ui.update { it.copy(ev = i) }
-        if (!extActiveNow) camera?.cameraControl?.setExposureCompensationIndex(i)
+        camera?.cameraControl?.setExposureCompensationIndex(i)
     }
     fun setAwb(mode: Int) { ui.update { it.copy(manual = it.manual.copy(awbMode = mode)) }; applyManual() }
     fun setAperture(f: Float) { ui.update { it.copy(manual = it.manual.copy(aperture = f)) }; applyManual() }
@@ -1140,7 +981,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     fun setFormat(f: PhotoFormat) { ui.update { it.copy(format = f) }; rebind() }
-    fun setExtension(mode: Int) { ui.update { it.copy(extension = mode) }; rebind() }
 
     fun setVideoQuality(q: Quality) { ui.update { it.copy(video = it.video.copy(quality = q)) }; rebind() }
     fun setVideoFps(fps: Int) { ui.update { it.copy(video = it.video.copy(fps = fps)) }; rebind() }
@@ -1293,17 +1133,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 if (useScreenFlash) {
                     screenFlashActive.value = true
                     delay(250) // let the screen reach full brightness and auto-exposure adjust
-                }
-                if (extActiveNow) {
-                    // Vendor modes (Night can take several seconds): guard against a capture that never ends
-                    val sel = selectorKey(s0)
-                    val m = s0.extension
-                    if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
-                    quirks.edit().putString(EXT_PENDING, extBrokenKey(sel, m)).commit()
-                    val done = withTimeoutOrNull(EXT_CAPTURE_TIMEOUT_MS) { takeOne(ic, activeFormat); true }
-                    quirks.edit().remove(EXT_PENDING).apply()
-                    if (done == null) disableExtension(sel, m, "${extensionLabel(m)} did not finish the photo on this phone")
-                    return@launch
                 }
                 repeat(s0.burst) {
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
