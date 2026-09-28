@@ -1,8 +1,8 @@
 # OmniCam
 
 A privacy-first, open-source camera app for Android, built to get the most out of older phones' cameras:
-it uses every capability the camera reports (manual controls, RAW, high-speed video, variable aperture, OIS) and adds
-its own processing, such as built-in HDR, where custom ROMs lack the manufacturer's extensions. OmniCam combines ideas from Open Camera, GrapheneOS Camera,
+it uses every capability the camera reports (manual controls, RAW, high-speed video, variable aperture, OIS) and relies on
+the phone's own image processing for clean, natural results. OmniCam combines ideas from Open Camera, GrapheneOS Camera,
 FreeDcam, Fossify Camera, MA Camera, Libre Camera and CameraX Info into one app. The code is written from scratch in
 Kotlin with Jetpack Compose, CameraX and Camera2 interop.
 
@@ -28,7 +28,6 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Manual ISO, shutter speed, focus, white balance presets, EV compensation | Open Camera, FreeDcam, Native Camera |
 | iPhone-style brightness bar in PHOTO/VIDEO: tap the viewfinder, drag the sun up or down; double-tap to reset (front and back cameras) | iOS Camera |
 | Aperture control on variable-aperture lenses (e.g. Galaxy S9/S9+: f/1.5 and f/2.4) in manual exposure | Native Camera |
-| Built-in HDR photo mode: 3 hand-held exposures (−2 / 0 / +2 EV), automatic alignment, ghost removal and exposure fusion. Works without vendor extensions | Camera Go, Open Camera |
 | RAW (DNG), RAW+JPEG, Ultra HDR (where the device supports them) | Open Camera, FreeDcam, Native Camera |
 | Histogram, zebra stripes, focus peaking | FreeDcam |
 | Timer (3/10 s), burst (3/5/10), grids (3×3, 4×4, golden), volume keys as shutter | Open Camera, Fossify, Libre Camera |
@@ -36,7 +35,6 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
 | SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps) with OmniCam's own Camera2 recorder (falls back to the older high-speed session API some drivers need, and waits for the camera to be released before switching modes), saved as slow-motion video | FreeDcam, Open Camera |
 | TIME-LAPSE mode, iPhone-style: one button, no settings. Speed starts at 15x and doubles automatically the longer you record, so the finished clip stays about 20–40 s at a uniform speed (frames are all-intra, so older frames can be thinned without re-encoding). Smooth by design: digital stabilisation (global motion from the median of 3x3 tiles, smoothed camera path, moving crop), deflicker (weighted moving average of brightness), and focus/white balance locked while recording | iOS Camera, vid.stab, timelapse-deflicker |
-| D3D mode (3D photo, OmniCam's take on Dazz Cam's D3D): one tap takes a photo, then the phone's depth sensor (ToF, Camera2 DEPTH_OUTPUT) is read, and the photo is turned into a looping clip where near and far parts move differently around the subject. No AI. Shown only on phones with a back depth camera (e.g. Galaxy S20+/Ultra, Note10+) | Dazz Cam |
 | Video bitrate set at or above stock camera apps (e.g. 18 Mbps at 1080p30, 48 Mbps at 4K30) instead of the device default | Open Camera |
 | Optical image stabilization kept on for photo and video when the lens has OIS | — |
 | Screen-as-flash for photo, and a bright white-screen light with a small live-preview corner while recording video, on cameras with no physical flash (typically the front camera) | Snapchat-style front flash |
@@ -81,22 +79,19 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
   converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
-  Many custom ROMs do not ship the manufacturer's extension libraries; the built-in HDR mode works without them.
+  Many custom ROMs do not ship the manufacturer's extension libraries, so these options may be missing there.
 - Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
   processing (tuned noise reduction and sharpening, gyro stabilization such as Samsung Super Steady, HDR10+) that
   Android does not expose to other apps. OmniCam matches what it can control, such as bitrate and OIS.
 - On phones with a depth-sensing auxiliary camera (used for portrait blur), that sensor is filtered out of the lens
   picker: it cannot take a normal photo or video.
-- Built-in HDR corrects hand shake and removes most ghosts from moving subjects by falling back to the normal exposure
-  where something moved. In very bright (clipped) areas movement cannot be detected, so faint ghosts are still possible
-  there. Processing takes a few seconds on older phones.
 
 ## Roadmap
 - RAW video (MotionCam-style)
 - Exposure/focus bracketing, timelapse, panorama
 - Choosing a save folder (SAF / SD card); honoring duration/size limits for `VIDEO_CAPTURE`
 - Direct access to physical cameras not exposed through CameraX
-- Night mode (multi-frame noise reduction); smarter HDR ghost handling in clipped highlights
+- Night mode and HDR from a multi-frame burst (GCam-style merge), only once it beats the phone's own processing
 - Screen light auto-brightness matched to ambient darkness, instead of a fixed on/off toggle
 - RGB histogram / waveform, translations, automated tests
 - A permanent release signing key and a stable release
@@ -131,8 +126,6 @@ app/src/main/java/app/omnicam/
   camera/Analyzers.kt         # histogram / zebra / peaking and QR scanner
   camera/HighSpeedRecorder.kt # Camera2 constrained high-speed slow-motion recorder
   camera/TimelapseRecorder.kt # automatic time-lapse: frame sampling, all-intra encoding, uniform thinning
-  camera/DepthCamera.kt       # D3D: depth-camera detection, DEPTH16 capture, depth-based parallax clip
-  camera/HdrProcessor.kt      # built-in HDR: frame alignment (MTB) + exposure fusion
   camera/CameraInspector.kt   # camera info screen
   storage/Storage.kt          # preferences, MediaStore output, EXIF scrubbing, geotagging
   model/Models.kt             # UI state and helpers
