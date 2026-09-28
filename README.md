@@ -80,6 +80,13 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
 - Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
   Many custom ROMs do not ship the manufacturer's extension libraries, so these options may be missing there.
+- Vendor modes run with the phone's own settings only (no forced OIS or brightness, default photo size), as in
+  Google's extension sample and GrapheneOS Camera. If a mode does not start, does not finish a photo, or freezes the
+  app, OmniCam turns that mode off on that phone and remembers it (per camera and app version).
+- Slow motion: high-speed recording by third-party apps is known to be unreliable on many Samsung models (reported for
+  the Galaxy S9, S10e and S20 main camera, while newer models such as the S24+ work), and the result differs per model
+  and firmware. OmniCam retries once, then tries the settings of Google's
+  official sample, then a lower frame rate; if nothing works, SLO-MO is hidden on that phone and video is used.
 - Compared with a manufacturer's own camera app, video may still look less polished: stock apps use private
   processing (tuned noise reduction and sharpening, gyro stabilization such as Samsung Super Steady, HDR10+) that
   Android does not expose to other apps. OmniCam matches what it can control, such as bitrate and OIS.
