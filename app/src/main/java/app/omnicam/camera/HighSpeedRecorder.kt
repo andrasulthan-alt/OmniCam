@@ -159,6 +159,8 @@ class HighSpeedRecorder(private val ctx: Context) {
                 override fun onDisconnected(d: CameraDevice) {
                     d.close()
                     if (device === d) device = null
+                    // Some Samsung firmwares drop a high-speed camera without any error: report it
+                    if (gen == generation) error("The camera was disconnected")
                 }
                 override fun onError(d: CameraDevice, error: Int) {
                     d.close()
@@ -283,14 +285,21 @@ class HighSpeedRecorder(private val ctx: Context) {
         pendingFd = null
     }
 
-    /** Starts recording (asynchronously: a new session is configured first). */
-    fun startRecording(onResult: (Boolean) -> Unit) {
-        val h = handler ?: return onResult(false)
+    /**
+     * Starts recording (asynchronously: a new session is configured first). [onResult] gets null on
+     * success, otherwise the step that failed: "camera", "encoder", "session" or "start".
+     */
+    fun startRecording(onResult: (String?) -> Unit) {
+        val h = handler ?: return onResult("camera")
         val gen = generation
         h.post {
             val prev = previewSurface
-            if (gen != generation || device == null || prev == null || !prepareRecorder()) {
-                mainHandler.post { onResult(false) }
+            if (gen != generation || device == null || prev == null) {
+                mainHandler.post { onResult("camera") }
+                return@post
+            }
+            if (!prepareRecorder()) {
+                mainHandler.post { onResult("encoder") }   // the preview session is untouched
                 return@post
             }
             runCatching { session?.stopRepeating() }
@@ -301,14 +310,14 @@ class HighSpeedRecorder(private val ctx: Context) {
                 if (!ok) {
                     releaseRecorder(discard = true)
                     restartPreview(gen)
-                    mainHandler.post { onResult(false) }
+                    mainHandler.post { onResult("session") }
                     return@createSession
                 }
                 repeat(recording = true)
                 val started = runCatching { recorder?.start() }.isSuccess
                 if (started) isRecording = true
                 else { releaseRecorder(discard = true); restartPreview(gen) }
-                mainHandler.post { onResult(started) }
+                mainHandler.post { onResult(if (started) null else "start") }
             }
         }
     }
