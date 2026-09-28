@@ -14,7 +14,6 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
-import android.media.MediaCodec
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -32,11 +31,14 @@ import java.util.concurrent.Executor
 data class HighSpeedCaps(val cameraId: String, val sizes: List<Size>, val ratesBySize: Map<Size, List<Int>>)
 
 /**
- * Slow-motion recorder built directly on Camera2's constrained high-speed session.
+ * Slow-motion recorder built directly on Camera2's constrained high-speed session, following the
+ * structure of Google's official Camera2 slow-motion sample:
+ *  - while previewing, the session contains ONLY the viewfinder surface;
+ *  - to record, a MediaRecorder is prepared and a new session [viewfinder, recorder] is created;
+ *  - on stop, that session is closed and the preview-only session is restarted.
+ * Keeping an idle recorder surface in the session stalled the viewfinder on some drivers (Huawei).
  *
- * Used when CameraX refuses high-speed recording even though the camera supports it, which happens
- * on custom ROMs that lack the high-speed video profiles CameraX relies on (e.g. Galaxy S9 on Pixel
- * Experience). Frames are captured at [fps] (120/240) and written at 30 fps playback, so the video
+ * Frames are captured at [fps] (120/240) and, by default, written for 30 fps playback, so the video
  * plays back 4x/8x slower. Video only, no audio.
  */
 class HighSpeedRecorder(private val ctx: Context) {
@@ -50,14 +52,15 @@ class HighSpeedRecorder(private val ctx: Context) {
     private var handler: Handler? = null
     private var device: CameraDevice? = null
     private var session: CameraConstrainedHighSpeedCaptureSession? = null
-    private var recorderSurface: Surface? = null
     private var recorder: MediaRecorder? = null
+    private var recorderSurface: Surface? = null
     private var pendingUri: Uri? = null
     private var pendingFd: ParcelFileDescriptor? = null
     private var previewSurface: Surface? = null
     private var size: Size? = null
     private var fps = 0
     private var orientationHint = 90
+    private var onErrorCb: (String) -> Unit = {}
 
     /** Cameras opened (or opening) and not yet fully closed. CameraX must wait until this is 0. */
     private val openCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -65,6 +68,22 @@ class HighSpeedRecorder(private val ctx: Context) {
 
     @Volatile var isRecording = false
         private set
+
+    /** Frames delivered by the current session; the engine uses it to detect a stalled driver. */
+    @Volatile var framesSeen = 0L
+        private set
+
+    /**
+     * Compatibility recorder settings, exactly as in Google's official Camera2 slow-motion sample:
+     * the file is written at the capture rate (e.g. 240 fps) instead of being retimed to 30 fps.
+     */
+    @Volatile var compatRecorder = false
+
+    private val frameCounter = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession, request: CaptureRequest, result: android.hardware.camera2.TotalCaptureResult,
+        ) { framesSeen++ }
+    }
 
     val isActive: Boolean get() = openCount.get() > 0
 
@@ -103,6 +122,8 @@ class HighSpeedRecorder(private val ctx: Context) {
         run.forEach { mainHandler.post(it) }
     }
 
+    private fun error(msg: String) { mainHandler.post { onErrorCb(msg) } }
+
     /** Opens the camera and starts the high-speed preview on [preview] (a Surface sized exactly [size]). */
     @SuppressLint("MissingPermission")
     fun open(
@@ -110,25 +131,18 @@ class HighSpeedRecorder(private val ctx: Context) {
         onReady: () -> Unit, onError: (String) -> Unit,
     ) {
         close()
+        framesSeen = 0
         val gen = ++generation
         this.size = size
         this.fps = fps
+        onErrorCb = onError
         previewSurface = preview
         orientationHint = runCatching {
             cm.getCameraCharacteristics(cameraId).get(CameraCharacteristics.SENSOR_ORIENTATION)
         }.getOrNull() ?: 90
         val t = HandlerThread("omnicam-slowmo").also { it.start() }
         thread = t
-        val h = Handler(t.looper)
-        handler = h
-        try {
-            recorderSurface = MediaCodec.createPersistentInputSurface()
-            prepareRecorder()
-        } catch (e: Exception) {
-            t.quitSafely()
-            onError("Could not prepare the slow-motion recorder: ${e.message}")
-            return
-        }
+        handler = Handler(t.looper)
         openCount.incrementAndGet()
         var counted = true
         fun releaseCount() { if (counted) { counted = false; deviceFullyClosed() } }
@@ -137,7 +151,10 @@ class HighSpeedRecorder(private val ctx: Context) {
                 override fun onOpened(d: CameraDevice) {
                     if (gen != generation) { d.close(); return }   // closed/reopened while opening
                     device = d
-                    createSession(gen, d, onReady, onError)
+                    createSession(gen, listOf(preview)) { ok ->
+                        if (ok) { repeat(recording = false); mainHandler.post(onReady) }
+                        else error("This camera refused the slow-motion configuration")
+                    }
                 }
                 override fun onDisconnected(d: CameraDevice) {
                     d.close()
@@ -146,61 +163,55 @@ class HighSpeedRecorder(private val ctx: Context) {
                 override fun onError(d: CameraDevice, error: Int) {
                     d.close()
                     if (device === d) device = null
-                    if (gen == generation) onError("Camera error $error")
+                    if (gen == generation) error("Camera error $error")
                 }
                 override fun onClosed(d: CameraDevice) {
                     t.quitSafely()
                     releaseCount()
                 }
-            }, h)
+            }, handler)
         } catch (e: Exception) {
             t.quitSafely()
             releaseCount()
-            onError("Could not open the camera: ${e.message}")
+            error("Could not open the camera: ${e.message}")
         }
     }
 
-    private fun createSession(gen: Int, d: CameraDevice, onReady: () -> Unit, onError: (String) -> Unit) {
-        val prev = previewSurface ?: return
-        val rec = recorderSurface ?: return
-        val h = handler ?: return
-        val exec = Executor { r -> h.post(r) }
+    /**
+     * Creates a constrained high-speed session for [surfaces] (new API first, then the older API that
+     * some vendor drivers need). [done] runs on the camera thread with the result.
+     */
+    private fun createSession(gen: Int, surfaces: List<Surface>, done: (Boolean) -> Unit) {
+        val d = device ?: return done(false)
+        val h = handler ?: return done(false)
+        var finished = false
+        fun finish(ok: Boolean) { if (!finished) { finished = true; done(ok) } }
 
         fun callback(onFailed: () -> Unit) = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 if (gen != generation) { runCatching { s.close() }; return }
                 val hs = s as? CameraConstrainedHighSpeedCaptureSession
-                if (hs == null) { onFailed(); return }
+                if (hs == null) { runCatching { s.close() }; onFailed(); return }
                 session = hs
-                try {
-                    repeat(recording = false)
-                    onReady()
-                } catch (e: Exception) {
-                    onError("Slow-motion preview failed: ${e.message}")
-                }
+                finish(true)
             }
             override fun onConfigureFailed(s: CameraCaptureSession) { if (gen == generation) onFailed() }
         }
 
-        // Older high-speed API: what FreeDcam and Open Camera use; some vendor drivers only accept this path
         fun legacy() {
             try {
                 @Suppress("DEPRECATION")
-                d.createConstrainedHighSpeedCaptureSession(
-                    listOf(prev, rec),
-                    callback { onError("This camera refused the slow-motion configuration") },
-                    h,
-                )
+                d.createConstrainedHighSpeedCaptureSession(surfaces, callback { finish(false) }, h)
             } catch (e: Exception) {
-                onError("This camera refused the slow-motion configuration: ${e.message}")
+                finish(false)
             }
         }
 
         try {
             val cfg = SessionConfiguration(
                 SessionConfiguration.SESSION_HIGH_SPEED,
-                listOf(OutputConfiguration(prev), OutputConfiguration(rec)),
-                exec,
+                surfaces.map { OutputConfiguration(it) },
+                Executor { r -> h.post(r) },
                 callback { legacy() },
             )
             d.createCaptureSession(cfg)
@@ -209,40 +220,54 @@ class HighSpeedRecorder(private val ctx: Context) {
         }
     }
 
-    /** Repeating high-speed burst: preview only, or preview + recorder while recording. */
+    /** Repeating high-speed burst: viewfinder only, or viewfinder + recorder while recording. */
     private fun repeat(recording: Boolean) {
         val d = device ?: return
         val s = session ?: return
-        val b = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-        b.addTarget(previewSurface!!)
-        if (recording) b.addTarget(recorderSurface!!)
-        b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
-        b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-        s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), null, handler)
+        val prev = previewSurface ?: return
+        runCatching {
+            val b = d.createCaptureRequest(if (recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
+            b.addTarget(prev)
+            if (recording) recorderSurface?.let { b.addTarget(it) }
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+            b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), frameCounter, handler)
+        }.onFailure { error("Slow-motion preview failed: ${it.message}") }
     }
 
-    /** A fresh MediaRecorder writing to a new pending file in DCIM/OmniCam, fed by the persistent surface. */
-    private fun prepareRecorder() {
-        val sz = size ?: error("no size")
-        val (uri, fd) = MediaOutput.newPendingVideo(ctx, MediaOutput.stamp(), "SLOMO")
-            ?: error("could not create the video file")
+    /** A MediaRecorder writing to a new pending file in DCIM/OmniCam. */
+    private fun prepareRecorder(): Boolean {
+        val sz = size ?: return false
+        val (uri, fd) = MediaOutput.newPendingVideo(ctx, MediaOutput.stamp(), "SLOMO") ?: return false
         pendingUri = uri
         pendingFd = fd
         val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(ctx) else @Suppress("DEPRECATION") MediaRecorder()
-        r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
-        r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        r.setOutputFile(fd.fileDescriptor)
-        r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-        r.setVideoSize(sz.width, sz.height)
-        // Captured at `fps`, stored for 30 fps playback: the encoder stretches timestamps = slow motion
-        r.setCaptureRate(fps.toDouble())
-        r.setVideoFrameRate(30)
-        r.setVideoEncodingBitRate(bitrateFor(sz))
-        r.setOrientationHint(orientationHint)
-        r.setInputSurface(recorderSurface!!)
-        r.prepare()
-        recorder = r
+        return try {
+            r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            r.setOutputFile(fd.fileDescriptor)
+            r.setVideoEncodingBitRate(bitrateFor(sz))
+            if (compatRecorder) {
+                r.setVideoFrameRate(fps)
+                r.setCaptureRate(fps.toDouble())
+            } else {
+                // Captured at `fps`, stored for 30 fps playback: the encoder stretches timestamps = slow motion
+                r.setCaptureRate(fps.toDouble())
+                r.setVideoFrameRate(30)
+            }
+            r.setVideoSize(sz.width, sz.height)
+            r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            r.setOrientationHint(orientationHint)
+            r.prepare()
+            recorder = r
+            recorderSurface = r.surface
+            true
+        } catch (e: Exception) {
+            runCatching { r.release() }
+            discardPending()
+            false
+        }
     }
 
     private fun bitrateFor(s: Size): Int = when {
@@ -251,62 +276,102 @@ class HighSpeedRecorder(private val ctx: Context) {
         else -> 8_000_000
     }
 
-    fun startRecording(): Boolean {
-        val r = recorder ?: return false
-        return try {
-            repeat(recording = true)
-            r.start()
-            isRecording = true
-            true
-        } catch (e: Exception) {
-            isRecording = false
-            runCatching { repeat(recording = false) }
-            false
+    private fun discardPending() {
+        pendingUri?.let { u -> runCatching { ctx.contentResolver.delete(u, null, null) } }
+        pendingUri = null
+        runCatching { pendingFd?.close() }
+        pendingFd = null
+    }
+
+    /** Starts recording (asynchronously: a new session is configured first). */
+    fun startRecording(onResult: (Boolean) -> Unit) {
+        val h = handler ?: return onResult(false)
+        val gen = generation
+        h.post {
+            val prev = previewSurface
+            if (gen != generation || device == null || prev == null || !prepareRecorder()) {
+                mainHandler.post { onResult(false) }
+                return@post
+            }
+            runCatching { session?.stopRepeating() }
+            runCatching { session?.close() }
+            session = null
+            val rec = recorderSurface!!
+            createSession(gen, listOf(prev, rec)) { ok ->
+                if (!ok) {
+                    releaseRecorder(discard = true)
+                    restartPreview(gen)
+                    mainHandler.post { onResult(false) }
+                    return@createSession
+                }
+                repeat(recording = true)
+                val started = runCatching { recorder?.start() }.isSuccess
+                if (started) isRecording = true
+                else { releaseRecorder(discard = true); restartPreview(gen) }
+                mainHandler.post { onResult(started) }
+            }
         }
     }
 
-    /**
-     * Stops and finalizes the file. Returns the saved video, or null on failure.
-     * With [prepareNext], a new recorder is made ready for the next take.
-     */
-    fun stopRecording(prepareNext: Boolean = true): Uri? {
+    /** Stops and finalizes the file, then restarts the preview. [onResult] gets the saved video or null. */
+    fun stopRecording(onResult: (Uri?) -> Unit) {
+        val h = handler ?: return onResult(finishTake())
+        val gen = generation
+        h.post {
+            val uri = finishTake()
+            restartPreview(gen)
+            mainHandler.post { onResult(uri) }
+        }
+    }
+
+    /** Stops the recorder and closes the recording session. Returns the saved video, or null. */
+    private fun finishTake(): Uri? {
         val r = recorder ?: return null
         val uri = pendingUri
+        runCatching { session?.stopRepeating() }
+        runCatching { session?.close() }
+        session = null
         var ok = true
-        runCatching { repeat(recording = false) }
-        try { r.stop() } catch (_: Exception) { ok = false }
+        try { r.stop() } catch (_: Exception) { ok = false }   // throws if no frame was recorded
         isRecording = false
-        r.release()
+        runCatching { r.release() }
         recorder = null
+        recorderSurface = null
         runCatching { pendingFd?.close() }
         pendingFd = null
         pendingUri = null
         if (uri != null) {
             if (ok) MediaOutput.finishPendingVideo(ctx, uri) else runCatching { ctx.contentResolver.delete(uri, null, null) }
         }
-        if (prepareNext) runCatching { prepareRecorder() }
         return if (ok) uri else null
+    }
+
+    private fun releaseRecorder(discard: Boolean) {
+        runCatching { recorder?.release() }
+        recorder = null
+        recorderSurface = null
+        if (discard) discardPending()
+        isRecording = false
+    }
+
+    private fun restartPreview(gen: Int) {
+        val prev = previewSurface ?: return
+        if (gen != generation || device == null) return
+        createSession(gen, listOf(prev)) { ok ->
+            if (ok) repeat(recording = false) else error("This camera refused the slow-motion configuration")
+        }
     }
 
     /** Releases the camera. Use [whenClosed] to know when CameraX may open it again. */
     fun close() {
         generation++   // callbacks of the previous open request are now ignored
-        if (isRecording) runCatching { stopRecording(prepareNext = false) }
+        if (isRecording) runCatching { finishTake() }
         runCatching { session?.close() }
         session = null
         val d = device
         device = null
-        runCatching { recorder?.release() }
-        recorder = null
-        // Unused pending file from the last prepare(): remove it from the gallery
-        pendingUri?.let { u -> runCatching { ctx.contentResolver.delete(u, null, null) } }
-        pendingUri = null
-        runCatching { pendingFd?.close() }
-        pendingFd = null
-        runCatching { recorderSurface?.release() }
-        recorderSurface = null
+        releaseRecorder(discard = true)
         previewSurface = null
-        isRecording = false
         thread = null
         handler = null
         // The device's onClosed() quits its thread and lowers openCount. A device still opening is

@@ -127,6 +127,19 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private var hsSurface: android.view.Surface? = null
     private var hsSurfaceSize: Size? = null
     private var hsTicker: kotlinx.coroutines.Job? = null
+    private var hsWatchdog: kotlinx.coroutines.Job? = null
+
+    /**
+     * Per-device quirks learned at runtime. A camera whose high-speed mode delivers no frames is
+     * remembered so the SLO-MO tab is hidden next time; the flag is keyed by app version so every
+     * update retries once.
+     */
+    private val quirks by lazy { app.getSharedPreferences("omnicam_quirks", android.content.Context.MODE_PRIVATE) }
+    private val appVersion by lazy {
+        runCatching { app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode }.getOrDefault(0L)
+    }
+    private fun slowMoBrokenKey(cameraId: String) = "slowmo_broken_${cameraId}_v$appVersion"
+    private fun slowMoCompatKey(cameraId: String) = "slowmo_compat_${cameraId}_v$appVersion"
     private val sound by lazy {
         MediaActionSound().also {
             it.load(MediaActionSound.SHUTTER_CLICK)
@@ -369,10 +382,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             // fallback: on a Huawei P50 Pro, binding it left the viewfinder black in every other mode
             // afterwards (and SLO-MO then reported "not supported") until the app was restarted.
             val c2Id = runCatching { Camera2CameraInfo.from(info).cameraId }.getOrNull()
-            val c2Caps = if (c2Id != null && !extActive) {
+            val slowMoBroken = c2Id != null && quirks.getBoolean(slowMoBrokenKey(c2Id), false)
+            val c2Caps = if (c2Id != null && !extActive && !slowMoBroken) {
                 HighSpeedRecorder.query(app.getSystemService(android.hardware.camera2.CameraManager::class.java), c2Id)
             } else null
-            val cameraXSlowMo = c2Caps == null &&
+            // A camera already known to fail high speed is not retried through CameraX either
+            val cameraXSlowMo = c2Caps == null && !slowMoBroken &&
                 runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
             val slowMoOk = c2Caps != null || cameraXSlowMo
             if (s.mode == Mode.SLOWMO) {
@@ -617,8 +632,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             if (now.mode != Mode.SLOWMO || !now.slowMo.camera2 || now.slowMo.size != size || hsSurfaceSize != size) {
                 return@whenClosed
             }
+            hs.compatRecorder = quirks.getBoolean(slowMoCompatKey(caps.cameraId), false)
             hs.open(caps.cameraId, size, now.slowMo.fps, surf,
-                onReady = {},
+                onReady = { scope.launch { startHighSpeedWatchdog(caps.cameraId) } },
                 onError = { msg ->
                     // Never leave the user on a black screen: fall back to normal video
                     scope.launch {
@@ -631,37 +647,83 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
     }
 
+    /**
+     * Some drivers accept a high-speed session but never deliver frames (frozen viewfinder, recordings
+     * fail). If nothing arrives within 2.5 s, try the next lower frame rate; if even the lowest fails,
+     * remember the quirk, hide SLO-MO and return to normal video.
+     */
+    private fun startHighSpeedWatchdog(cameraId: String) {
+        hsWatchdog?.cancel()
+        hsWatchdog = scope.launch {
+            // Frames must keep arriving: a driver that delivers one frame and then stalls shows a
+            // frozen viewfinder just like one that delivers none.
+            delay(1500)
+            val before = hs.framesSeen
+            delay(1500)
+            val s = ui.value
+            val progressed = hs.framesSeen - before
+            if (s.mode != Mode.SLOWMO || !s.slowMo.camera2 || !hs.isActive || progressed >= 15) return@launch
+            val lower = s.slowMo.rates.filter { it < s.slowMo.fps }.maxOrNull()
+            if (lower != null) {
+                toast("${s.slowMo.fps} fps is not working on this phone, trying $lower fps")
+                ui.update { it.copy(slowMo = it.slowMo.copy(fps = lower)) }
+                rebind()
+            } else {
+                quirks.edit().putBoolean(slowMoBrokenKey(cameraId), true).apply()
+                toast("Slow motion is not supported by this phone's camera driver. Switched to video.")
+                ui.update { it.copy(mode = Mode.VIDEO, slowMoOk = false, slowMo = it.slowMo.copy(camera2 = false)) }
+                rebind()
+            }
+        }
+    }
+
     private fun closeHighSpeed() {
+        hsWatchdog?.cancel()
+        hsWatchdog = null
         hsTicker?.cancel()
         hsTicker = null
-        if (hs.isRecording) {
-            val uri = hs.stopRecording(prepareNext = false)
-            ui.update { it.copy(recording = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
-        }
-        hs.close()
+        if (hs.isRecording) ui.update { it.copy(recording = false, recordedMs = 0) }
+        hs.close()   // finalizes a running take
+
     }
 
     private fun toggleHighSpeedRecording() {
         if (hs.isRecording) {
             hsTicker?.cancel()
             hsTicker = null
-            val uri = hs.stopRecording()
             if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
-            ui.update { it.copy(recording = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
-            if (uri == null) toast("Slow-motion recording failed")
+            ui.update { it.copy(busy = true) }
+            hs.stopRecording { uri ->
+                ui.update { it.copy(recording = false, busy = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
+                val camId = hsCaps?.cameraId
+                if (uri == null && hs.framesSeen > 0 && !hs.compatRecorder && camId != null) {
+                    // Frames arrive but the encoder rejected the retimed file: switch to the settings of
+                    // Google's official sample and let the user try again.
+                    hs.compatRecorder = true
+                    quirks.edit().putBoolean(slowMoCompatKey(camId), true).apply()
+                    toast("Recording failed. Switched to compatibility mode, please record again.")
+                } else if (uri == null) {
+                    toast("Slow-motion recording failed")
+                }
+            }
             return
         }
-        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
-        if (!hs.startRecording()) {
-            toast("Could not start slow-motion recording")
-            return
-        }
-        val t0 = SystemClock.elapsedRealtime()
-        ui.update { it.copy(recording = true, paused = false, recordedMs = 0) }
-        hsTicker = scope.launch {
-            while (true) {
-                ui.update { it.copy(recordedMs = SystemClock.elapsedRealtime() - t0) }
-                delay(250)
+        if (ui.value.busy) return
+        ui.update { it.copy(busy = true) }
+        hs.startRecording { ok ->
+            ui.update { it.copy(busy = false) }
+            if (!ok) {
+                toast("Could not start slow-motion recording")
+                return@startRecording
+            }
+            if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+            val t0 = SystemClock.elapsedRealtime()
+            ui.update { it.copy(recording = true, paused = false, recordedMs = 0) }
+            hsTicker = scope.launch {
+                while (true) {
+                    ui.update { it.copy(recordedMs = SystemClock.elapsedRealtime() - t0) }
+                    delay(250)
+                }
             }
         }
     }
