@@ -28,12 +28,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.camera.extensions.ExtensionMode
 import app.omnicam.camera.CameraEngine
 import app.omnicam.model.CamUi
 import app.omnicam.model.Readout
 import app.omnicam.model.awbLabel
-import app.omnicam.model.extensionLabel
 import app.omnicam.model.formatAperture
 import app.omnicam.model.formatShutter
 import app.omnicam.model.qualityLabel
@@ -47,17 +45,11 @@ private fun ChipRow(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-/** PHOTO mode row: the phone's own vendor extensions (if any) and Ultra HDR. */
+/** PHOTO mode row: Ultra HDR (where the phone supports it). */
 @Composable
 fun ExtensionRow(ui: CamUi, engine: CameraEngine) {
-    if (ui.extensions.isEmpty() && ui.formats.none { it.name == "ULTRA_HDR" }) return
+    if (ui.formats.none { it.name == "ULTRA_HDR" }) return
     ChipRow {
-        Chip("Std", ui.extension == ExtensionMode.NONE, enabled = !ui.busy) {
-            if (ui.extension != ExtensionMode.NONE) engine.setExtension(ExtensionMode.NONE)
-        }
-        ui.extensions.forEach { m ->
-            Chip(extensionLabel(m), ui.extension == m, enabled = !ui.busy) { engine.setExtension(m) }
-        }
         ui.formats.filter { it.name == "ULTRA_HDR" }.forEach { f ->
             Chip(f.label, ui.format == f, enabled = !ui.busy) {
                 engine.setFormat(if (ui.format == f) app.omnicam.model.PhotoFormat.JPEG else f)
