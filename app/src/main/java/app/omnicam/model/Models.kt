@@ -13,9 +13,9 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 enum class Mode(val label: String) {
-    PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO"), SLOWMO("SLO-MO"), QR("QR");
+    PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO"), SLOWMO("SLO-MO"), TIMELAPSE("TIME-LAPSE"), THREE_D("3D"), QR("QR");
 
-    val isVideo: Boolean get() = this == VIDEO || this == SLOWMO
+    val isVideo: Boolean get() = this == VIDEO || this == SLOWMO || this == TIMELAPSE
 }
 
 /** High-speed (slow-motion) recording state. Frames are captured at [fps] and played back at 30 fps. */
@@ -200,6 +200,13 @@ data class CamUi(
     val screenFlash: Boolean = false,
     /** Quick brightness (exposure compensation index) for PHOTO/VIDEO, iPhone-style. PRO has its own. */
     val ev: Int = 0,
+    /** Time-lapse: current automatic speed (15 = 15x) and the length of the clip so far, in frames. */
+    val lapseSpeed: Int = 15,
+    val lapseFrames: Int = 0,
+    /** D3D: the phone has a depth camera (mode shown only then); capture step (-1 = idle); building the clip. */
+    val depthOk: Boolean = false,
+    val wiggleProgress: Int = -1,
+    val wiggleProcessing: Boolean = false,
 
     val manual: ManualState = ManualState(),
     val ranges: ManualRanges? = null,
