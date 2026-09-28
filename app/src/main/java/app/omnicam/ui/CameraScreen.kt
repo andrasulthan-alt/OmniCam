@@ -187,7 +187,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
 
             // iPhone-style brightness bar (PHOTO / VIDEO / SLO-MO; PRO has its own EV slider)
             val evRanges = ui.ranges
-            val evModeOk = ui.mode == Mode.PHOTO || ui.mode == Mode.THREE_D || ui.mode.isVideo
+            val evModeOk = ui.mode == Mode.PHOTO || ui.mode.isVideo
             if (evModeOk && !whiteLightMode && evRanges != null && evRanges.evSupported &&
                 evRanges.evMax > evRanges.evMin && (showEvBar || ui.ev != 0)
             ) {
@@ -215,19 +215,6 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                     modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 64.dp, start = 10.dp)
                         .clip(RoundedCornerShape(6.dp)).background(PanelBg).padding(horizontal = 8.dp, vertical = 4.dp),
                 )
-            }
-            // D3D: "hold still" while the depth sensor is read, then a short "processing" state
-            if (ui.mode == Mode.THREE_D && (ui.wiggleProgress >= 0 || ui.wiggleProcessing)) {
-                Column(
-                    Modifier.align(Alignment.Center).clip(RoundedCornerShape(16.dp)).background(PanelBg)
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        if (ui.wiggleProcessing) "MAKING 3D…" else "HOLD STILL",
-                        color = Color.White, fontSize = 20.sp, fontFamily = Dot,
-                    )
-                }
             }
             if (ui.countdown > 0) {
                 Text(
@@ -277,7 +264,6 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                     }
                     Mode.SLOWMO -> SlowMoPanel(ui, engine)
                     Mode.TIMELAPSE -> TimelapsePanel(ui)
-                    Mode.THREE_D -> ThreeDPanel()
                     else -> {}
                 }
             }
@@ -304,8 +290,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
             // Mode picker: spreads evenly when the tabs fit, and scrolls sideways (keeping the active mode
             // in view) on narrow screens or with large display/font sizes, so no mode is ever cut off.
             val modes = Mode.entries.filter {
-                (it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO) &&
-                    (it != Mode.THREE_D || (ui.depthOk && !ui.front))
+                it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO
             }
             val modeScroll = rememberScrollState()
             LaunchedEffect(ui.mode, modeScroll.maxValue) {

@@ -47,27 +47,19 @@ private fun ChipRow(content: @Composable () -> Unit) {
     ) { content() }
 }
 
-/** PHOTO mode row: built-in HDR, vendor extensions (if any), Ultra HDR. */
+/** PHOTO mode row: the phone's own vendor extensions (if any) and Ultra HDR. */
 @Composable
 fun ExtensionRow(ui: CamUi, engine: CameraEngine) {
-    val r = ui.ranges
-    val builtInHdr = r != null && r.evSupported && r.evMax > r.evMin
-    if (!builtInHdr && ui.extensions.isEmpty() && ui.formats.size <= 1) return
+    if (ui.extensions.isEmpty() && ui.formats.none { it.name == "ULTRA_HDR" }) return
     ChipRow {
-        Chip("Std", ui.extension == ExtensionMode.NONE && !ui.hdr, enabled = !ui.busy) {
-            engine.setHdr(false)
+        Chip("Std", ui.extension == ExtensionMode.NONE, enabled = !ui.busy) {
             if (ui.extension != ExtensionMode.NONE) engine.setExtension(ExtensionMode.NONE)
         }
-        if (builtInHdr) {
-            Chip("HDR", ui.hdr, enabled = !ui.busy) { engine.setHdr(!ui.hdr) }
-        }
         ui.extensions.forEach { m ->
-            // Vendor HDR is labelled separately so it is not confused with the built-in HDR
-            val label = if (m == ExtensionMode.HDR) "HDR (vendor)" else extensionLabel(m)
-            Chip(label, ui.extension == m, enabled = !ui.busy) { engine.setExtension(m) }
+            Chip(extensionLabel(m), ui.extension == m, enabled = !ui.busy) { engine.setExtension(m) }
         }
         ui.formats.filter { it.name == "ULTRA_HDR" }.forEach { f ->
-            Chip(f.label, ui.format == f, enabled = !ui.hdr) {
+            Chip(f.label, ui.format == f, enabled = !ui.busy) {
                 engine.setFormat(if (ui.format == f) app.omnicam.model.PhotoFormat.JPEG else f)
             }
         }
@@ -226,15 +218,6 @@ fun TimelapsePanel(ui: CamUi) {
     Text(
         if (ui.recording) "Speed rises automatically the longer you record"
         else "Auto speed · the finished clip stays about 20–40 s",
-        color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp,
-    )
-}
-
-/** D3D hint. */
-@Composable
-fun ThreeDPanel() {
-    Text(
-        "One tap · uses this phone's depth sensor · hold still for a second after the shot",
         color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp,
     )
 }
