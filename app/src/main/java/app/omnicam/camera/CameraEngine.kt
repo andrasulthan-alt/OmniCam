@@ -129,6 +129,17 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private var hsTicker: kotlinx.coroutines.Job? = null
     private var hsWatchdog: kotlinx.coroutines.Job? = null
 
+    // Automatic (iPhone-style) time-lapse
+    private val lapse by lazy { TimelapseRecorder(app) }
+    // D3D: only on phones whose back depth camera (ToF) is exposed to apps
+    private val depthCam: DepthCam? by lazy {
+        DepthSupport.find(app.getSystemService(android.hardware.camera2.CameraManager::class.java))
+    }
+    private val depthGrabber by lazy { DepthGrabber(app) }
+    private val wiggleBusy get() = ui.value.wiggleProgress >= 0 || ui.value.wiggleProcessing
+    private var lapseTicker: kotlinx.coroutines.Job? = null
+    private var lifecycleObserver: androidx.lifecycle.LifecycleEventObserver? = null
+
     /**
      * Per-device quirks learned at runtime. A camera whose high-speed mode delivers no frames is
      * remembered so the SLO-MO tab is hidden next time; the flag is keyed by app version so every
@@ -233,6 +244,11 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         owner = o
         previewView = v
         orientation.enable()
+        // A time-lapse must be finished properly when the app goes to the background
+        lifecycleObserver?.let { runCatching { o.lifecycle.removeObserver(it) } }
+        lifecycleObserver = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP && lapse.isRecording) stopTimelapse()
+        }.also { o.lifecycle.addObserver(it) }
         if (ui.value.ready) rebind()
     }
 
@@ -246,6 +262,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         scope.cancel()
         io.shutdown()
         analysisExec.shutdown()
+        runCatching { lapse.release() }
         runCatching { provider?.unbindAll() }
         runCatching { sound.release() }
     }
@@ -340,7 +357,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     // ───────────────────────── binding ─────────────────────────
 
     fun rebind() {
-        if (recording != null) return
+        if (recording != null || lapse.isRecording) return
         // Leaving (or re-configuring) Camera2 slow motion: CameraX may only open the camera once
         // OmniCam's own high-speed session has fully released it. Opening earlier leaves some phones
         // (e.g. Huawei) with a black viewfinder.
@@ -390,6 +407,11 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val cameraXSlowMo = c2Caps == null && !slowMoBroken &&
                 runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
             val slowMoOk = c2Caps != null || cameraXSlowMo
+            // D3D needs the back depth camera: fall back to PHOTO on other phones or on the front camera
+            if (s.mode == Mode.THREE_D && (depthCam == null || s.front)) {
+                ui.update { it.copy(mode = Mode.PHOTO) }
+                return tryBind(p, o, v, withAnalysis)
+            }
             if (s.mode == Mode.SLOWMO) {
                 if (c2Caps != null) { enterCamera2SlowMo(p, c2Caps); return true }
                 if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
@@ -398,7 +420,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 return tryBind(p, o, v, withAnalysis)
             }
 
-            val ratio = if (s.mode == Mode.VIDEO) {
+            val ratio = if (s.mode == Mode.VIDEO || s.mode == Mode.TIMELAPSE) {
                 AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
             } else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
 
@@ -486,6 +508,35 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
                 Mode.QR -> cases += buildAnalysis(qrAnalyzer, Size(1280, 960))
                 Mode.SLOWMO -> {} // bound separately in bindSlowMo()
+                Mode.TIMELAPSE -> {
+                    // Time-lapse samples frames from a 16:9 YUV stream (up to 1080p); see TimelapseRecorder
+                    cases += ImageAnalysis.Builder()
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                .setResolutionStrategy(
+                                    ResolutionStrategy(Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                                )
+                                .build()
+                        )
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                        .build()
+                        .also { it.setAnalyzer(lapse.executor, lapse) }
+                }
+                Mode.THREE_D -> {
+                    // D3D: a normal 4:3 photo; the depth map is grabbed right after it (see captureD3D)
+                    val ic = ImageCapture.Builder()
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                                .build()
+                        )
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .build()
+                    imageCapture = ic
+                    cases += ic
+                }
             }
 
             p.unbindAll()
@@ -519,6 +570,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     ranges = ranges, hasFlash = cam.cameraInfo.hasFlashUnit(),
                     qr = if (s.mode == Mode.QR) it.qr else null,
                     slowMoOk = slowMoOk,
+                    depthOk = depthCam != null,
                     slowMo = it.slowMo.copy(camera2 = false),
                 )
             }
@@ -935,14 +987,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     // ───────────────────────── kontrol umum ─────────────────────────
 
     fun setMode(m: Mode) {
-        if (recording != null || hs.isRecording || m == ui.value.mode) return
+        if (recording != null || hs.isRecording || lapse.isRecording || wiggleBusy || m == ui.value.mode) return
         ui.update { it.copy(mode = m, torch = false, qr = null, manual = if (m == Mode.PRO) it.manual else it.manual.copy(exposureManual = false, focusManual = false, awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO, evIndex = 0)) }
         scopeFrame.value = null
         rebind()
     }
 
     fun flip() {
-        if (recording != null || hs.isRecording) return
+        if (recording != null || hs.isRecording || lapse.isRecording || wiggleBusy) return
         ui.update { it.copy(front = !it.front, lensId = null, ev = 0) }
         rebind()
     }
@@ -1030,10 +1082,123 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     // ───────────────────────── pengambilan gambar/video ─────────────────────────
 
+    private fun toggleTimelapse() {
+        if (lapse.isRecording) { stopTimelapse(); return }
+        if (ui.value.busy) return
+        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+        lapse.start()
+        lockForTimelapse(true)
+        val t0 = SystemClock.elapsedRealtime()
+        ui.update { it.copy(recording = true, paused = false, recordedMs = 0, lapseSpeed = lapse.speed, lapseFrames = 0) }
+        lapseTicker = scope.launch {
+            while (true) {
+                ui.update {
+                    it.copy(recordedMs = SystemClock.elapsedRealtime() - t0, lapseSpeed = lapse.speed, lapseFrames = lapse.keptFrames)
+                }
+                delay(500)
+            }
+        }
+    }
+
+    /**
+     * D3D: one tap takes a photo, then the depth camera is read for a moment (CameraX is paused,
+     * since most phones cannot run two back cameras at once), then the 3D clip is built.
+     */
+    private fun captureD3D() {
+        val ic = imageCapture ?: return
+        val dc = depthCam ?: return
+        if (wiggleBusy) return
+        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
+        ui.update { it.copy(wiggleProgress = 0, wiggleProcessing = false) }
+        ic.takePicture(mainExec, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(image: ImageProxy) {
+                val jpeg = runCatching {
+                    val b = image.planes[0].buffer
+                    ByteArray(b.remaining()).also { b.get(it) }
+                }.getOrNull()
+                val rot = image.imageInfo.rotationDegrees
+                image.close()
+                if (jpeg == null) { d3dFailed("Could not read the photo"); return }
+                grabDepthAndBuild(jpeg, rot, dc)
+            }
+            override fun onError(e: ImageCaptureException) { d3dFailed(e.message ?: "Photo failed") }
+        })
+    }
+
+    private fun grabDepthAndBuild(jpeg: ByteArray, rotation: Int, dc: DepthCam) {
+        val mainId = currentCameraId()
+        val cm = app.getSystemService(android.hardware.camera2.CameraManager::class.java)
+        val mainChars = runCatching { cm.getCameraCharacteristics(mainId ?: "0") }.getOrNull()
+        val mainOrientation = mainChars?.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        val mainEq = mainChars?.let { DepthSupport.eqFocal(it) } ?: 26f
+        provider?.unbindAll()
+        camera = null
+        imageCapture = null
+        depthGrabber.grab(dc) { depth, err ->
+            rebind()   // the depth camera is closed now: bring the viewfinder back
+            if (depth == null) { d3dFailed(err ?: "No depth data"); return@grab }
+            ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = true) }
+            io.execute {
+                val result = runCatching { D3DRenderer.build(app, jpeg, rotation, mainOrientation, mainEq, depth, dc) }
+                scope.launch {
+                    val uri = result.getOrNull()
+                    ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = false, lastUri = uri ?: it.lastUri) }
+                    if (uri != null) toast("3D photo saved")
+                    else toast("3D: ${result.exceptionOrNull()?.message ?: "could not build the clip"}")
+                }
+            }
+        }
+    }
+
+    private fun d3dFailed(msg: String) {
+        ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = false) }
+        toast("3D: $msg")
+    }
+
+    private fun currentCameraId(): String? =
+        runCatching { camera?.cameraInfo?.let { Camera2CameraInfo.from(it).cameraId } }.getOrNull()
+
+    /**
+     * During a time-lapse, focus and white balance are locked: refocusing and colour shifts are the
+     * main causes of "pumping" in phone time-lapses. Exposure stays automatic (light changes over
+     * long recordings) and is smoothed by the recorder's deflicker instead.
+     */
+    private fun lockForTimelapse(lock: Boolean) {
+        val cam = camera ?: return
+        runCatching {
+            if (lock) {
+                val centre = androidx.camera.core.SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
+                cam.cameraControl.startFocusAndMetering(
+                    FocusMeteringAction.Builder(centre, FocusMeteringAction.FLAG_AF).disableAutoCancel().build()
+                )
+                Camera2CameraControl.from(cam.cameraControl).setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder().setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true).build()
+                )
+            } else {
+                cam.cameraControl.cancelFocusAndMetering()
+                applyManual()   // restores the normal request options (clears the AWB lock)
+            }
+        }
+    }
+
+    private fun stopTimelapse() {
+        lockForTimelapse(false)
+        lapseTicker?.cancel()
+        lapseTicker = null
+        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+        ui.update { it.copy(busy = true) }
+        lapse.stop { uri, err ->
+            ui.update { it.copy(recording = false, busy = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
+            if (uri != null) toast("Time-lapse saved") else if (err != null) toast("Time-lapse: $err")
+        }
+    }
+
     fun onShutter() {
         when (ui.value.mode) {
             Mode.PHOTO, Mode.PRO -> capturePhoto()
             Mode.VIDEO, Mode.SLOWMO -> toggleRecording()
+            Mode.TIMELAPSE -> toggleTimelapse()
+            Mode.THREE_D -> captureD3D()
             Mode.QR -> {}
         }
     }
