@@ -6,7 +6,6 @@ package app.omnicam.model
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import androidx.camera.core.ImageCapture
-import androidx.camera.extensions.ExtensionMode
 import androidx.camera.video.Quality
 import kotlin.math.ln
 import kotlin.math.pow
@@ -43,14 +42,6 @@ enum class GridType(val label: String) {
     OFF("Off"), THIRDS("3×3"), GRID4("4×4"), GOLDEN("Golden")
 }
 
-fun extensionLabel(mode: Int): String = when (mode) {
-    ExtensionMode.AUTO -> "Auto"
-    ExtensionMode.HDR -> "HDR"
-    ExtensionMode.NIGHT -> "Night"
-    ExtensionMode.BOKEH -> "Portrait"
-    ExtensionMode.FACE_RETOUCH -> "Retouch"
-    else -> "Off"
-}
 
 fun qualityLabel(q: Quality): String = when (q) {
     Quality.UHD -> "4K"
@@ -192,8 +183,6 @@ data class CamUi(
 
     val format: PhotoFormat = PhotoFormat.JPEG,
     val formats: List<PhotoFormat> = listOf(PhotoFormat.JPEG),
-    val extension: Int = ExtensionMode.NONE,
-    val extensions: List<Int> = emptyList(),
     /** Screen-as-flash for photo capture, offered when the active camera has no physical flash (e.g. front camera). */
     val screenFlash: Boolean = false,
     /** Quick brightness (exposure compensation index) for PHOTO/VIDEO, iPhone-style. PRO has its own. */
