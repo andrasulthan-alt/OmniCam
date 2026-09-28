@@ -20,6 +20,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Range
 import android.util.Size
@@ -41,6 +42,10 @@ data class HighSpeedCaps(val cameraId: String, val sizes: List<Size>, val ratesB
 class HighSpeedRecorder(private val ctx: Context) {
 
     private val cm = ctx.getSystemService(CameraManager::class.java)
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // State of the current (latest) open request. Older requests are recognised by their generation.
+    private var generation = 0
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     private var device: CameraDevice? = null
@@ -52,11 +57,16 @@ class HighSpeedRecorder(private val ctx: Context) {
     private var previewSurface: Surface? = null
     private var size: Size? = null
     private var fps = 0
-    private var cameraId = ""
     private var orientationHint = 90
+
+    /** Cameras opened (or opening) and not yet fully closed. CameraX must wait until this is 0. */
+    private val openCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val waiters = ArrayList<() -> Unit>()
 
     @Volatile var isRecording = false
         private set
+
+    val isActive: Boolean get() = openCount.get() > 0
 
     companion object {
         /** Camera2 high-speed capabilities of [cameraId], or null if the camera has none. */
@@ -75,6 +85,24 @@ class HighSpeedRecorder(private val ctx: Context) {
         }.getOrNull()
     }
 
+    /** Runs [block] on the main thread once every camera this recorder opened is fully closed. */
+    fun whenClosed(block: () -> Unit) {
+        synchronized(waiters) {
+            if (openCount.get() == 0) { mainHandler.post(block); return }
+            waiters += block
+        }
+    }
+
+    private fun deviceFullyClosed() {
+        val run: List<() -> Unit>
+        synchronized(waiters) {
+            if (openCount.decrementAndGet() > 0) return
+            run = waiters.toList()
+            waiters.clear()
+        }
+        run.forEach { mainHandler.post(it) }
+    }
+
     /** Opens the camera and starts the high-speed preview on [preview] (a Surface sized exactly [size]). */
     @SuppressLint("MissingPermission")
     fun open(
@@ -82,7 +110,7 @@ class HighSpeedRecorder(private val ctx: Context) {
         onReady: () -> Unit, onError: (String) -> Unit,
     ) {
         close()
-        this.cameraId = cameraId
+        val gen = ++generation
         this.size = size
         this.fps = fps
         previewSurface = preview
@@ -97,52 +125,88 @@ class HighSpeedRecorder(private val ctx: Context) {
             recorderSurface = MediaCodec.createPersistentInputSurface()
             prepareRecorder()
         } catch (e: Exception) {
+            t.quitSafely()
             onError("Could not prepare the slow-motion recorder: ${e.message}")
             return
         }
+        openCount.incrementAndGet()
+        var counted = true
+        fun releaseCount() { if (counted) { counted = false; deviceFullyClosed() } }
         try {
             cm.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(d: CameraDevice) {
+                    if (gen != generation) { d.close(); return }   // closed/reopened while opening
                     device = d
-                    createSession(d, onReady, onError)
+                    createSession(gen, d, onReady, onError)
                 }
-                override fun onDisconnected(d: CameraDevice) { d.close(); device = null }
+                override fun onDisconnected(d: CameraDevice) {
+                    d.close()
+                    if (device === d) device = null
+                }
                 override fun onError(d: CameraDevice, error: Int) {
-                    d.close(); device = null
-                    onError("Camera error $error")
+                    d.close()
+                    if (device === d) device = null
+                    if (gen == generation) onError("Camera error $error")
+                }
+                override fun onClosed(d: CameraDevice) {
+                    t.quitSafely()
+                    releaseCount()
                 }
             }, h)
         } catch (e: Exception) {
+            t.quitSafely()
+            releaseCount()
             onError("Could not open the camera: ${e.message}")
         }
     }
 
-    private fun createSession(d: CameraDevice, onReady: () -> Unit, onError: (String) -> Unit) {
+    private fun createSession(gen: Int, d: CameraDevice, onReady: () -> Unit, onError: (String) -> Unit) {
         val prev = previewSurface ?: return
         val rec = recorderSurface ?: return
-        val exec = Executor { r -> handler?.post(r) }
-        val cfg = SessionConfiguration(
-            SessionConfiguration.SESSION_HIGH_SPEED,
-            listOf(OutputConfiguration(prev), OutputConfiguration(rec)),
-            exec,
-            object : CameraCaptureSession.StateCallback() {
-                override fun onConfigured(s: CameraCaptureSession) {
-                    val hs = s as? CameraConstrainedHighSpeedCaptureSession
-                    if (hs == null) { onError("High-speed session not available"); return }
-                    session = hs
-                    try {
-                        repeat(recording = false)
-                        onReady()
-                    } catch (e: Exception) {
-                        onError("Slow-motion preview failed: ${e.message}")
-                    }
+        val h = handler ?: return
+        val exec = Executor { r -> h.post(r) }
+
+        fun callback(onFailed: () -> Unit) = object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(s: CameraCaptureSession) {
+                if (gen != generation) { runCatching { s.close() }; return }
+                val hs = s as? CameraConstrainedHighSpeedCaptureSession
+                if (hs == null) { onFailed(); return }
+                session = hs
+                try {
+                    repeat(recording = false)
+                    onReady()
+                } catch (e: Exception) {
+                    onError("Slow-motion preview failed: ${e.message}")
                 }
-                override fun onConfigureFailed(s: CameraCaptureSession) {
-                    onError("This camera refused the slow-motion configuration")
-                }
-            },
-        )
-        d.createCaptureSession(cfg)
+            }
+            override fun onConfigureFailed(s: CameraCaptureSession) { if (gen == generation) onFailed() }
+        }
+
+        // Older high-speed API: what FreeDcam and Open Camera use; some vendor drivers only accept this path
+        fun legacy() {
+            try {
+                @Suppress("DEPRECATION")
+                d.createConstrainedHighSpeedCaptureSession(
+                    listOf(prev, rec),
+                    callback { onError("This camera refused the slow-motion configuration") },
+                    h,
+                )
+            } catch (e: Exception) {
+                onError("This camera refused the slow-motion configuration: ${e.message}")
+            }
+        }
+
+        try {
+            val cfg = SessionConfiguration(
+                SessionConfiguration.SESSION_HIGH_SPEED,
+                listOf(OutputConfiguration(prev), OutputConfiguration(rec)),
+                exec,
+                callback { legacy() },
+            )
+            d.createCaptureSession(cfg)
+        } catch (e: Exception) {
+            legacy()
+        }
     }
 
     /** Repeating high-speed burst: preview only, or preview + recorder while recording. */
@@ -201,8 +265,11 @@ class HighSpeedRecorder(private val ctx: Context) {
         }
     }
 
-    /** Stops, finalizes the file and prepares the next one. Returns the saved video, or null on failure. */
-    fun stopRecording(): Uri? {
+    /**
+     * Stops and finalizes the file. Returns the saved video, or null on failure.
+     * With [prepareNext], a new recorder is made ready for the next take.
+     */
+    fun stopRecording(prepareNext: Boolean = true): Uri? {
         val r = recorder ?: return null
         val uri = pendingUri
         var ok = true
@@ -217,16 +284,17 @@ class HighSpeedRecorder(private val ctx: Context) {
         if (uri != null) {
             if (ok) MediaOutput.finishPendingVideo(ctx, uri) else runCatching { ctx.contentResolver.delete(uri, null, null) }
         }
-        // Ready for the next take (the persistent surface stays attached to the session)
-        runCatching { prepareRecorder() }
+        if (prepareNext) runCatching { prepareRecorder() }
         return if (ok) uri else null
     }
 
+    /** Releases the camera. Use [whenClosed] to know when CameraX may open it again. */
     fun close() {
-        if (isRecording) runCatching { stopRecording() }
+        generation++   // callbacks of the previous open request are now ignored
+        if (isRecording) runCatching { stopRecording(prepareNext = false) }
         runCatching { session?.close() }
         session = null
-        runCatching { device?.close() }
+        val d = device
         device = null
         runCatching { recorder?.release() }
         recorder = null
@@ -238,9 +306,11 @@ class HighSpeedRecorder(private val ctx: Context) {
         runCatching { recorderSurface?.release() }
         recorderSurface = null
         previewSurface = null
-        thread?.quitSafely()
+        isRecording = false
         thread = null
         handler = null
-        isRecording = false
+        // The device's onClosed() quits its thread and lowers openCount. A device still opening is
+        // closed in onOpened() because its generation is now stale.
+        if (d != null) runCatching { d.close() }
     }
 }

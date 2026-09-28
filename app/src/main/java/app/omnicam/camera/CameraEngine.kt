@@ -328,6 +328,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun rebind() {
         if (recording != null) return
+        // Leaving (or re-configuring) Camera2 slow motion: CameraX may only open the camera once
+        // OmniCam's own high-speed session has fully released it. Opening earlier leaves some phones
+        // (e.g. Huawei) with a black viewfinder.
+        if (hs.isActive) {
+            closeHighSpeed()
+            hs.whenClosed { rebind() }
+            return
+        }
         val p = provider ?: return
         val o = owner ?: return
         val v = previewView ?: return
@@ -356,15 +364,20 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
             // Any previous Camera2 slow-motion session must release the camera before CameraX binds again
             closeHighSpeed()
-            val cameraXSlowMo = runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
+            // Slow motion: OmniCam's own Camera2 high-speed recorder is preferred on every device. It closes
+            // the camera cleanly when leaving SLO-MO. CameraX's HighSpeedVideoSessionConfig is only a
+            // fallback: on a Huawei P50 Pro, binding it left the viewfinder black in every other mode
+            // afterwards (and SLO-MO then reported "not supported") until the app was restarted.
             val c2Id = runCatching { Camera2CameraInfo.from(info).cameraId }.getOrNull()
-            val c2Caps = if (!cameraXSlowMo && c2Id != null && !extActive) {
+            val c2Caps = if (c2Id != null && !extActive) {
                 HighSpeedRecorder.query(app.getSystemService(android.hardware.camera2.CameraManager::class.java), c2Id)
             } else null
-            val slowMoOk = cameraXSlowMo || c2Caps != null
+            val cameraXSlowMo = c2Caps == null &&
+                runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
+            val slowMoOk = c2Caps != null || cameraXSlowMo
             if (s.mode == Mode.SLOWMO) {
-                if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
                 if (c2Caps != null) { enterCamera2SlowMo(p, c2Caps); return true }
+                if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
                 toast("Slow motion is not supported by this camera")
                 ui.update { it.copy(mode = Mode.VIDEO, slowMoOk = false) }
                 return tryBind(p, o, v, withAnalysis)
@@ -565,7 +578,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val s = ui.value
         val byQuality = LinkedHashMap<Quality, Size>()
         caps.sizes.forEach { sz -> byQuality.putIfAbsent(qualityFor(sz), sz) }
-        val q = s.slowMo.quality?.takeIf { it in byQuality } ?: byQuality.keys.first()
+        // Default to 720p like Google's official Camera2 slow-motion sample: it is the high-speed size
+        // most devices support at their top frame rate. The user can still pick 1080p.
+        val q = s.slowMo.quality?.takeIf { it in byQuality }
+            ?: byQuality.keys.firstOrNull { it == Quality.HD } ?: byQuality.keys.first()
         val size = byQuality.getValue(q)
         val rates = caps.ratesBySize[size].orEmpty()
         val fps = s.slowMo.fps.takeIf { it in rates } ?: rates.last()
@@ -594,17 +610,32 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         if (s.mode != Mode.SLOWMO || !s.slowMo.camera2) return
         // High-speed sessions require the preview surface to match the stream size exactly
         if (hsSurfaceSize != size) return
-        hs.open(caps.cameraId, size, s.slowMo.fps, surface,
-            onReady = {},
-            onError = { msg -> scope.launch { toast(msg) } },
-        )
+        hs.whenClosed {
+            // Re-check: the mode, surface or size may have changed while the previous session closed
+            val now = ui.value
+            val surf = hsSurface ?: return@whenClosed
+            if (now.mode != Mode.SLOWMO || !now.slowMo.camera2 || now.slowMo.size != size || hsSurfaceSize != size) {
+                return@whenClosed
+            }
+            hs.open(caps.cameraId, size, now.slowMo.fps, surf,
+                onReady = {},
+                onError = { msg ->
+                    // Never leave the user on a black screen: fall back to normal video
+                    scope.launch {
+                        toast("$msg. Switched to video.")
+                        ui.update { it.copy(mode = Mode.VIDEO, slowMo = it.slowMo.copy(camera2 = false)) }
+                        rebind()
+                    }
+                },
+            )
+        }
     }
 
     private fun closeHighSpeed() {
         hsTicker?.cancel()
         hsTicker = null
         if (hs.isRecording) {
-            val uri = hs.stopRecording()
+            val uri = hs.stopRecording(prepareNext = false)
             ui.update { it.copy(recording = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
         }
         hs.close()
