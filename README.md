@@ -34,7 +34,7 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Timer (3/10 s), burst (3/5/10), grids (3×3, 4×4, golden), volume keys as shutter | Open Camera, Fossify, Libre Camera |
 | Zoom chips and lens picker (35 mm equivalent) | GrapheneOS Camera, MA Camera |
 | Video: 4K/1080p/720p/480p, 30/60 fps, HDR10 HLG, stabilization, mic toggle, pause/resume, torch | GrapheneOS Camera, Libre Camera |
-| SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps), saved as slow-motion video. Falls back to OmniCam's own Camera2 high-speed recorder when CameraX lacks the ROM's high-speed profiles (e.g. custom ROMs) | Open Camera |
+| SLO-MO mode: hardware high-speed recording (e.g. 120/240 fps) with OmniCam's own Camera2 recorder (falls back to the older high-speed session API some drivers need, and waits for the camera to be released before switching modes), saved as slow-motion video | FreeDcam, Open Camera |
 | Video bitrate set at or above stock camera apps (e.g. 18 Mbps at 1080p30, 48 Mbps at 4K30) instead of the device default | Open Camera |
 | Optical image stabilization kept on for photo and video when the lens has OIS | — |
 | Screen-as-flash for photo, and a bright white-screen light with a small live-preview corner while recording video, on cameras with no physical flash (typically the front camera) | Snapchat-style front flash |
@@ -44,6 +44,11 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 
 Every feature is enabled only if your camera reports support for it. Open **Settings → Camera info** to see what
 your device exposes, and use **Copy report** when filing a bug.
+
+## Design
+Nothing-inspired look: pure black, white and a single red accent, outline pills, and the dot-matrix typeface
+[Doto](https://github.com/oliverlalan/Doto) (SIL OFL 1.1) for modes, numbers and readouts. The font is subset to Latin
+and digits (about 50 KB). OmniCam is not affiliated with Nothing Technology.
 
 ## Privacy and security
 - **No INTERNET permission.** The app cannot send data anywhere.
@@ -58,6 +63,7 @@ your device exposes, and use **Copy report** when filing a bug.
 |---|---|---|
 | Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work; 4K records a steady 30 fps (viewfinder tears while recording 4K, see known issues). |
 | Samsung Galaxy S20 Ultra (SM-G988B), stock One UI | 13 | Viewfinder reported blurry; fix pending confirmation (0.3.3). |
+| Huawei P50 Pro, HarmonyOS | — | Viewfinder went black after SLO-MO and the QR tab was cut off; fixed in 0.3.9, pending confirmation. |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
 
@@ -92,6 +98,14 @@ Tested it on another device? Open an issue with the output of **Copy report**.
 - Screen light auto-brightness matched to ambient darkness, instead of a fixed on/off toggle
 - RGB histogram / waveform, translations, automated tests
 - A permanent release signing key and a stable release
+
+## References
+Behaviour was checked against these open-source camera apps and samples (no code copied):
+Google's [android/camera-samples](https://github.com/android/camera-samples) (Camera2 and CameraX slow motion),
+[FreeDcam](https://github.com/KillerInk/FreeDcam) (vendor quirks, high-speed sessions),
+[LineageOS Aperture](https://github.com/LineageOS/android_packages_apps_Aperture) (CameraX on many devices),
+[GrapheneOS Camera](https://github.com/GrapheneOS/Camera), [Fossify Camera](https://github.com/FossifyOrg/Camera),
+[MotionCam](https://github.com/mirsadm/motioncam) and CameraX Info.
 
 ## Building
 **GitHub Actions:** every push runs the *Build APK* workflow. With the signing secrets configured
