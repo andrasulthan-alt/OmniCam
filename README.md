@@ -7,7 +7,7 @@ FreeDcam, Fossify Camera, MA Camera, Libre Camera and CameraX Info into one app.
 Kotlin with Jetpack Compose, CameraX and Camera2 interop.
 
 > **Status: early test build.** OmniCam builds successfully but has only been tested on one device so far.
-> Expect bugs, especially in RAW capture, vendor extensions and manual controls. Please report issues.
+> Expect bugs, especially in RAW capture, slow motion and manual controls. Please report issues.
 
 **Requirements:** Android 11 (API 30) or newer.
 
@@ -24,7 +24,6 @@ package `app.omnicam.dev`): uninstall that one once. Your photos and videos stay
 | Photo, video and QR modes | GrapheneOS Camera |
 | QR/barcode scanner (ZXing, no Play Services; never opens links automatically) | GrapheneOS Camera |
 | Strips GPS and device identifiers from JPEG EXIF; location off by default; permissions asked only when needed | GrapheneOS Camera |
-| Safe probing of vendor extensions (HDR / Night / Portrait / Retouch) | GrapheneOS Camera |
 | Manual ISO, shutter speed, focus, white balance presets, EV compensation | Open Camera, FreeDcam, Native Camera |
 | iPhone-style brightness bar in PHOTO/VIDEO: tap the viewfinder, drag the sun up or down; double-tap to reset (front and back cameras) | iOS Camera |
 | Aperture control on variable-aperture lenses (e.g. Galaxy S9/S9+: f/1.5 and f/2.4) in manual exposure | Native Camera |
@@ -78,11 +77,9 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   through the recording stream (CameraX stream sharing, tried in 0.3.6 and with a minimal custom GL copy) removes the
   tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
   converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
-- Video stabilization and vendor extensions (HDR / Night / Portrait) are only offered when the device reports support.
-  Many custom ROMs do not ship the manufacturer's extension libraries, so these options may be missing there.
-- Vendor modes run with the phone's own settings only (no forced OIS or brightness, default photo size), as in
-  Google's extension sample and GrapheneOS Camera. If a mode does not start, does not finish a photo, or freezes the
-  app, OmniCam turns that mode off on that phone and remembers it (per camera and app version).
+- Video stabilization is only offered when the device reports support.
+- Vendor modes (HDR / Night / Portrait from the phone maker) were removed in 0.4.3: on tested Samsung phones they froze
+  the camera even when run with the phone's own settings only. PHOTO uses the phone's normal image processing.
 - Slow motion: high-speed recording by third-party apps is known to be unreliable on many Samsung models (reported for
   the Galaxy S9, S10e and S20 main camera, while newer models such as the S24+ work), and the result differs per model
   and firmware. OmniCam retries once, then tries the settings of Google's
@@ -129,7 +126,7 @@ Forks: open the *Actions* tab and enable workflows first.
 app/src/main/java/app/omnicam/
   MainActivity.kt, CameraViewModel.kt
   ExternalCapture.kt          # IMAGE_CAPTURE / VIDEO_CAPTURE for other apps
-  camera/CameraEngine.kt      # CameraX binding, photo/video, manual controls, extensions
+  camera/CameraEngine.kt      # CameraX binding, photo/video, manual controls
   camera/Analyzers.kt         # histogram / zebra / peaking and QR scanner
   camera/HighSpeedRecorder.kt # Camera2 constrained high-speed slow-motion recorder
   camera/TimelapseRecorder.kt # automatic time-lapse: frame sampling, all-intra encoding, uniform thinning
