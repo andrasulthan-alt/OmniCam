@@ -131,12 +131,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     // Automatic (iPhone-style) time-lapse
     private val lapse by lazy { TimelapseRecorder(app) }
-    // D3D: only on phones whose back depth camera (ToF) is exposed to apps
-    private val depthCam: DepthCam? by lazy {
-        DepthSupport.find(app.getSystemService(android.hardware.camera2.CameraManager::class.java))
-    }
-    private val depthGrabber by lazy { DepthGrabber(app) }
-    private val wiggleBusy get() = ui.value.wiggleProgress >= 0 || ui.value.wiggleProcessing
     private var lapseTicker: kotlinx.coroutines.Job? = null
     private var lifecycleObserver: androidx.lifecycle.LifecycleEventObserver? = null
 
@@ -407,11 +401,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val cameraXSlowMo = c2Caps == null && !slowMoBroken &&
                 runCatching { Recorder.getHighSpeedVideoCapabilities(info) != null }.getOrDefault(false)
             val slowMoOk = c2Caps != null || cameraXSlowMo
-            // D3D needs the back depth camera: fall back to PHOTO on other phones or on the front camera
-            if (s.mode == Mode.THREE_D && (depthCam == null || s.front)) {
-                ui.update { it.copy(mode = Mode.PHOTO) }
-                return tryBind(p, o, v, withAnalysis)
-            }
             if (s.mode == Mode.SLOWMO) {
                 if (c2Caps != null) { enterCamera2SlowMo(p, c2Caps); return true }
                 if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
@@ -524,19 +513,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         .build()
                         .also { it.setAnalyzer(lapse.executor, lapse) }
                 }
-                Mode.THREE_D -> {
-                    // D3D: a normal 4:3 photo; the depth map is grabbed right after it (see captureD3D)
-                    val ic = ImageCapture.Builder()
-                        .setResolutionSelector(
-                            ResolutionSelector.Builder()
-                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                                .build()
-                        )
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .build()
-                    imageCapture = ic
-                    cases += ic
-                }
             }
 
             p.unbindAll()
@@ -570,7 +546,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     ranges = ranges, hasFlash = cam.cameraInfo.hasFlashUnit(),
                     qr = if (s.mode == Mode.QR) it.qr else null,
                     slowMoOk = slowMoOk,
-                    depthOk = depthCam != null,
                     slowMo = it.slowMo.copy(camera2 = false),
                 )
             }
@@ -987,14 +962,14 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     // ───────────────────────── kontrol umum ─────────────────────────
 
     fun setMode(m: Mode) {
-        if (recording != null || hs.isRecording || lapse.isRecording || wiggleBusy || m == ui.value.mode) return
+        if (recording != null || hs.isRecording || lapse.isRecording || m == ui.value.mode) return
         ui.update { it.copy(mode = m, torch = false, qr = null, manual = if (m == Mode.PRO) it.manual else it.manual.copy(exposureManual = false, focusManual = false, awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO, evIndex = 0)) }
         scopeFrame.value = null
         rebind()
     }
 
     fun flip() {
-        if (recording != null || hs.isRecording || lapse.isRecording || wiggleBusy) return
+        if (recording != null || hs.isRecording || lapse.isRecording) return
         ui.update { it.copy(front = !it.front, lensId = null, ev = 0) }
         rebind()
     }
@@ -1006,18 +981,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     fun setFormat(f: PhotoFormat) { ui.update { it.copy(format = f) }; rebind() }
-    fun setExtension(mode: Int) { ui.update { it.copy(extension = mode, hdr = false) }; rebind() }
-
-    /** Built-in HDR uses plain JPEG frames and no vendor extension. */
-    fun setHdr(on: Boolean) {
-        val s = ui.value
-        val needRebind = on && (s.extension != ExtensionMode.NONE || s.format != PhotoFormat.JPEG)
-        ui.update {
-            if (on) it.copy(hdr = true, extension = ExtensionMode.NONE, format = PhotoFormat.JPEG)
-            else it.copy(hdr = false)
-        }
-        if (needRebind) rebind()
-    }
+    fun setExtension(mode: Int) { ui.update { it.copy(extension = mode) }; rebind() }
 
     fun setVideoQuality(q: Quality) { ui.update { it.copy(video = it.video.copy(quality = q)) }; rebind() }
     fun setVideoFps(fps: Int) { ui.update { it.copy(video = it.video.copy(fps = fps)) }; rebind() }
@@ -1100,61 +1064,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
     }
 
-    /**
-     * D3D: one tap takes a photo, then the depth camera is read for a moment (CameraX is paused,
-     * since most phones cannot run two back cameras at once), then the 3D clip is built.
-     */
-    private fun captureD3D() {
-        val ic = imageCapture ?: return
-        val dc = depthCam ?: return
-        if (wiggleBusy) return
-        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
-        ui.update { it.copy(wiggleProgress = 0, wiggleProcessing = false) }
-        ic.takePicture(mainExec, object : ImageCapture.OnImageCapturedCallback() {
-            override fun onCaptureSuccess(image: ImageProxy) {
-                val jpeg = runCatching {
-                    val b = image.planes[0].buffer
-                    ByteArray(b.remaining()).also { b.get(it) }
-                }.getOrNull()
-                val rot = image.imageInfo.rotationDegrees
-                image.close()
-                if (jpeg == null) { d3dFailed("Could not read the photo"); return }
-                grabDepthAndBuild(jpeg, rot, dc)
-            }
-            override fun onError(e: ImageCaptureException) { d3dFailed(e.message ?: "Photo failed") }
-        })
-    }
-
-    private fun grabDepthAndBuild(jpeg: ByteArray, rotation: Int, dc: DepthCam) {
-        val mainId = currentCameraId()
-        val cm = app.getSystemService(android.hardware.camera2.CameraManager::class.java)
-        val mainChars = runCatching { cm.getCameraCharacteristics(mainId ?: "0") }.getOrNull()
-        val mainOrientation = mainChars?.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-        val mainEq = mainChars?.let { DepthSupport.eqFocal(it) } ?: 26f
-        provider?.unbindAll()
-        camera = null
-        imageCapture = null
-        depthGrabber.grab(dc) { depth, err ->
-            rebind()   // the depth camera is closed now: bring the viewfinder back
-            if (depth == null) { d3dFailed(err ?: "No depth data"); return@grab }
-            ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = true) }
-            io.execute {
-                val result = runCatching { D3DRenderer.build(app, jpeg, rotation, mainOrientation, mainEq, depth, dc) }
-                scope.launch {
-                    val uri = result.getOrNull()
-                    ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = false, lastUri = uri ?: it.lastUri) }
-                    if (uri != null) toast("3D photo saved")
-                    else toast("3D: ${result.exceptionOrNull()?.message ?: "could not build the clip"}")
-                }
-            }
-        }
-    }
-
-    private fun d3dFailed(msg: String) {
-        ui.update { it.copy(wiggleProgress = -1, wiggleProcessing = false) }
-        toast("3D: $msg")
-    }
-
     private fun currentCameraId(): String? =
         runCatching { camera?.cameraInfo?.let { Camera2CameraInfo.from(it).cameraId } }.getOrNull()
 
@@ -1198,7 +1107,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             Mode.PHOTO, Mode.PRO -> capturePhoto()
             Mode.VIDEO, Mode.SLOWMO -> toggleRecording()
             Mode.TIMELAPSE -> toggleTimelapse()
-            Mode.THREE_D -> captureD3D()
             Mode.QR -> {}
         }
     }
@@ -1226,10 +1134,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 if (useScreenFlash) {
                     screenFlashActive.value = true
                     delay(250) // let the screen reach full brightness and auto-exposure adjust
-                }
-                if (s0.mode == Mode.PHOTO && s0.hdr && s0.extension == ExtensionMode.NONE) {
-                    captureHdr(ic)
-                    return@launch
                 }
                 repeat(s0.burst) {
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
@@ -1289,102 +1193,6 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             if (cont.isActive) cont.resume(Unit)
         }
     }
-
-    // ───────────────────────── built-in HDR ─────────────────────────
-
-    /**
-     * Three JPEG frames at 0, -2 and +2 EV (clamped to the camera's range), aligned and merged by
-     * [HdrProcessor]. Needs exposure compensation support; no vendor extension is involved.
-     */
-    private suspend fun captureHdr(ic: ImageCapture) {
-        val cam = camera ?: return
-        val r = ui.value.ranges
-        val st = prefs.settings.value
-        if (r == null || !r.evSupported || r.evStep <= 0f || r.evMax <= r.evMin) {
-            toast("HDR needs exposure compensation, which this camera does not support")
-            return
-        }
-        val steps = (2f / r.evStep).roundToInt().coerceAtLeast(1)
-        // Bracket around the user's chosen brightness (0 unless they dragged the exposure bar)
-        val base = ui.value.ev.coerceIn(r.evMin, r.evMax)
-        val indices = listOf(base, max(r.evMin, base - steps), min(r.evMax, base + steps)).distinct()
-        if (indices.size < 2) {
-            toast("HDR is not available with this camera's exposure range")
-            return
-        }
-        val loc = if (st.geotag) MediaOutput.lastLocation(app) else null
-        val frames = ArrayList<Bitmap>(indices.size)
-        var rotationDeg = 0
-        toast("HDR: hold still")
-        try {
-            for ((n, idx) in indices.withIndex()) {
-                setEvAndWait(cam, idx)
-                if (n == 0 && st.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
-                val shot = captureBitmap(ic)
-                if (shot == null) {
-                    toast("HDR capture failed")
-                    frames.forEach { it.recycle() }
-                    return
-                }
-                frames += shot.first
-                rotationDeg = shot.second
-            }
-        } finally {
-            runCatching { cam.cameraControl.setExposureCompensationIndex(ui.value.ev) }
-        }
-        toast("Processing HDR…")
-        val uri = withContext(Dispatchers.Default) {
-            try {
-                val fused = HdrProcessor.fuse(frames, 0)
-                frames.forEach { it.recycle() }
-                val bytes = ByteArrayOutputStream().use { os ->
-                    fused.compress(Bitmap.CompressFormat.JPEG, 95, os)
-                    os.toByteArray()
-                }
-                fused.recycle()
-                MediaOutput.saveJpeg(app, bytes, MediaOutput.stamp(), "HDR", rotationDeg, loc)
-            } catch (_: OutOfMemoryError) {
-                null
-            } catch (_: Exception) {
-                null
-            }
-        }
-        if (uri != null) {
-            ui.update { it.copy(lastUri = uri) }
-            toast("HDR photo saved")
-        } else {
-            toast("HDR processing failed")
-        }
-    }
-
-    private suspend fun setEvAndWait(cam: Camera, index: Int) {
-        val f = cam.cameraControl.setExposureCompensationIndex(index)
-        suspendCancellableCoroutine<Unit> { c -> f.addListener({ if (c.isActive) c.resume(Unit) }, mainExec) }
-        delay(350) // let auto exposure settle on the new target
-    }
-
-    private suspend fun captureBitmap(ic: ImageCapture): Pair<Bitmap, Int>? =
-        suspendCancellableCoroutine { cont ->
-            ic.takePicture(io, object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    val res: Pair<Bitmap, Int>? = try {
-                        val buf = image.planes[0].buffer
-                        val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
-                        val bmp: Bitmap? = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bmp != null) Pair(bmp, image.imageInfo.rotationDegrees) else null
-                    } catch (_: Throwable) {
-                        null
-                    } finally {
-                        image.close()
-                    }
-                    if (cont.isActive) cont.resume(res)
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    if (cont.isActive) cont.resume(null)
-                }
-            })
-        }
 
     private fun toggleRecording() {
         if (ui.value.mode == Mode.SLOWMO && ui.value.slowMo.camera2) { toggleHighSpeedRecording(); return }
