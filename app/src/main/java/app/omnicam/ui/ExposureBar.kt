@@ -35,7 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 
-private val Sun = Color(0xFFFFCC00)
+private val Sun = Color.White
 
 /**
  * iPhone-style brightness control: a vertical bar with a sun thumb. Drag up = brighter, down = darker.
@@ -68,7 +68,7 @@ fun ExposureBar(
         val value = ev * evStep
         Text(
             if (ev == 0) "0" else (if (value > 0) "+" else "") + "%.1f".format(java.util.Locale.US, value),
-            color = Sun, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+            color = Sun, fontSize = 13.sp, fontFamily = Dot,
             modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(PanelBg)
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )

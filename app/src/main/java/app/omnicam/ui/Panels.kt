@@ -5,6 +5,15 @@ package app.omnicam.ui
 
 import android.hardware.camera2.CaptureRequest
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -69,83 +78,109 @@ fun ExtensionRow(ui: CamUi, engine: CameraEngine) {
 fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
     val r = ui.ranges
     val m = ui.manual
+    var section by rememberSaveable { mutableStateOf(ProSection.EXPOSURE) }
+    // One section at a time (like stock "Pro" modes): the panel stays short on every screen size
+    // instead of stacking every control and covering the viewfinder.
     Column(
-        Modifier
-            .fillMaxWidth()
-            .heightIn(max = 240.dp)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Format berkas
-        ChipRow {
-            ui.formats.forEach { f -> Chip(f.label, ui.format == f) { engine.setFormat(f) } }
-        }
-        // Alat bantu
-        ChipRow {
-            Chip("Histogram", ui.scope.histogram) { engine.setScope(ui.scope.copy(histogram = !ui.scope.histogram)) }
-            Chip("Zebra", ui.scope.zebra) { engine.setScope(ui.scope.copy(zebra = !ui.scope.zebra)) }
-            Chip("Focus peaking", ui.scope.peaking) { engine.setScope(ui.scope.copy(peaking = !ui.scope.peaking)) }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            ProSection.entries.forEach { sec ->
+                val on = section == sec
+                Text(
+                    sec.label,
+                    color = if (on) Accent else Color.White.copy(alpha = 0.55f),
+                    fontSize = 12.sp,
+                    fontFamily = Dot,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Clip,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f).clickable { section = sec }.padding(vertical = 6.dp),
+                )
+            }
         }
 
-        if (r == null) return@Column
-
-        // Eksposur
-        ChipRow {
-            Chip("Auto exposure", !m.exposureManual) { engine.setExposureManual(false) }
-            Chip("Manual exposure", m.exposureManual, enabled = r.manualSensor) { engine.setExposureManual(true) }
-        }
-        if (m.exposureManual && r.manualSensor) {
-            LabeledSlider("ISO", "${m.iso}", r.isoFrac(m.iso)) { engine.setIso(r.isoAt(it)) }
-            LabeledSlider("Shutter", formatShutter(m.exposureNs), r.expFrac(m.exposureNs)) { engine.setExposureNs(r.expAt(it)) }
-            if (r.variableAperture) {
+        when (section) {
+            ProSection.EXPOSURE -> {
+                if (r == null) return@Column
                 ChipRow {
-                    Text("Aperture", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                    r.apertures.forEach { a -> Chip(formatAperture(a), m.aperture == a) { engine.setAperture(a) } }
+                    Chip("Auto", !m.exposureManual) { engine.setExposureManual(false) }
+                    Chip("Manual", m.exposureManual, enabled = r.manualSensor) { engine.setExposureManual(true) }
+                }
+                if (m.exposureManual && r.manualSensor) {
+                    LabeledSlider("ISO", "${m.iso}", r.isoFrac(m.iso)) { engine.setIso(r.isoAt(it)) }
+                    LabeledSlider("Shutter", formatShutter(m.exposureNs), r.expFrac(m.exposureNs)) { engine.setExposureNs(r.expAt(it)) }
+                    if (r.variableAperture) {
+                        ChipRow {
+                            Text("Aperture", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                            r.apertures.forEach { a -> Chip(formatAperture(a), m.aperture == a) { engine.setAperture(a) } }
+                        }
+                    }
+                } else {
+                    if (r.evSupported && r.evMax > r.evMin) {
+                        LabeledSlider(
+                            label = "EV compensation",
+                            valueText = "%+.1f".format(m.evIndex * r.evStep),
+                            value = m.evIndex.toFloat(),
+                            valueRange = r.evMin.toFloat()..r.evMax.toFloat(),
+                            steps = (r.evMax - r.evMin - 1).coerceAtLeast(0),
+                        ) { engine.setEv(it.roundToInt()) }
+                    }
+                    if (readout.iso > 0) {
+                        val ap = if (r.variableAperture && readout.aperture > 0f) " · ${formatAperture(readout.aperture)}" else ""
+                        Text(
+                            "Auto: ISO ${readout.iso} · ${formatShutter(readout.expNs)}$ap",
+                            color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp,
+                        )
+                    }
+                }
+                if (!r.manualSensor) {
+                    Text("This camera does not allow manual ISO/shutter for other apps.", color = Color.Gray, fontSize = 11.sp)
                 }
             }
-        } else if (r.evSupported && r.evMax > r.evMin) {
-            LabeledSlider(
-                label = "EV compensation",
-                valueText = "%+.1f".format(m.evIndex * r.evStep),
-                value = m.evIndex.toFloat(),
-                valueRange = r.evMin.toFloat()..r.evMax.toFloat(),
-                steps = (r.evMax - r.evMin - 1).coerceAtLeast(0),
-            ) { engine.setEv(it.roundToInt()) }
-        }
-        if (!r.manualSensor) {
-            Text("This camera does not expose manual sensor controls (MANUAL_SENSOR).", color = Color.Gray, fontSize = 11.sp)
-        }
-
-        // Fokus
-        ChipRow {
-            Chip("Autofocus", !m.focusManual) { engine.setFocusManual(false) }
-            Chip("Manual focus", m.focusManual, enabled = r.manualFocus) { engine.setFocusManual(true) }
-        }
-        if (m.focusManual && r.manualFocus) {
-            val d = m.focusDiopter
-            LabeledSlider(
-                label = "Focus distance",
-                valueText = if (d < 0.05f) "∞" else "${(100f / d).roundToInt()} cm",
-                value = d / r.minFocusDiopter,
-            ) { engine.setFocusDiopter(it * r.minFocusDiopter) }
-        }
-
-        // White balance
-        val awbs = r.awbModes.filter { it != CaptureRequest.CONTROL_AWB_MODE_OFF }
-        if (awbs.size > 1) {
-            ChipRow {
-                awbs.forEach { a -> Chip(awbLabel(a), m.awbMode == a) { engine.setAwb(a) } }
+            ProSection.FOCUS -> {
+                if (r == null) return@Column
+                ChipRow {
+                    Chip("Autofocus", !m.focusManual) { engine.setFocusManual(false) }
+                    Chip("Manual", m.focusManual, enabled = r.manualFocus) { engine.setFocusManual(true) }
+                }
+                if (m.focusManual && r.manualFocus) {
+                    val d = m.focusDiopter
+                    LabeledSlider(
+                        label = "Focus distance",
+                        valueText = if (d < 0.05f) "∞" else "${(100f / d).roundToInt()} cm",
+                        value = d / r.minFocusDiopter,
+                    ) { engine.setFocusDiopter(it * r.minFocusDiopter) }
+                } else if (!r.manualFocus) {
+                    Text("This camera has fixed focus or no manual focus.", color = Color.Gray, fontSize = 11.sp)
+                }
+            }
+            ProSection.WB -> {
+                val awbs = r?.awbModes?.filter { it != CaptureRequest.CONTROL_AWB_MODE_OFF }.orEmpty()
+                if (awbs.size > 1) {
+                    ChipRow { awbs.forEach { a -> Chip(awbLabel(a), m.awbMode == a) { engine.setAwb(a) } } }
+                } else {
+                    Text("White balance is automatic on this camera.", color = Color.Gray, fontSize = 11.sp)
+                }
+            }
+            ProSection.FILE -> {
+                ChipRow { ui.formats.forEach { f -> Chip(f.label, ui.format == f) { engine.setFormat(f) } } }
+            }
+            ProSection.TOOLS -> {
+                ChipRow {
+                    Chip("Histogram", ui.scope.histogram) { engine.setScope(ui.scope.copy(histogram = !ui.scope.histogram)) }
+                    Chip("Zebra", ui.scope.zebra) { engine.setScope(ui.scope.copy(zebra = !ui.scope.zebra)) }
+                    Chip("Peaking", ui.scope.peaking) { engine.setScope(ui.scope.copy(peaking = !ui.scope.peaking)) }
+                }
             }
         }
-        if (!m.exposureManual && readout.iso > 0) {
-            val ap = if (r.variableAperture && readout.aperture > 0f) " · ${formatAperture(readout.aperture)}" else ""
-            Text(
-                "Auto: ISO ${readout.iso} · ${formatShutter(readout.expNs)}$ap",
-                color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp,
-            )
-        }
     }
+}
+
+enum class ProSection(val label: String) {
+    EXPOSURE("EXPOSURE"), FOCUS("FOCUS"), WB("WB"), FILE("FILE"), TOOLS("TOOLS")
 }
 
 @Composable

@@ -60,6 +60,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -200,21 +202,21 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
             if (ui.mode == Mode.PRO && readout.iso > 0) {
                 Text(
                     "ISO ${readout.iso}  ${app.omnicam.model.formatShutter(readout.expNs)}",
-                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                    color = Color.White, fontSize = 12.sp, fontFamily = Dot,
                     modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 64.dp, start = 10.dp)
                         .clip(RoundedCornerShape(6.dp)).background(PanelBg).padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
             if (ui.countdown > 0) {
                 Text(
-                    "${ui.countdown}", color = Color.White, fontSize = 96.sp, fontWeight = FontWeight.Bold,
+                    "${ui.countdown}", color = Color.White, fontSize = 96.sp, fontFamily = Dot,
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
             if (ui.recording) {
                 Text(
                     (if (ui.paused) "⏸ " else "● ") + formatTime(ui.recordedMs),
-                    color = Color(0xFFFF5252), fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                    color = Accent, fontSize = 16.sp, fontFamily = Dot,
                     modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 44.dp)
                         .clip(RoundedCornerShape(50)).background(PanelBg).padding(horizontal = 12.dp, vertical = 4.dp),
                 )
@@ -271,21 +273,35 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 ) { Text("⟲", color = Color.White, fontSize = 24.sp) }
             }
 
-            // Pemilih mode
+            // Mode picker: every tab gets an equal share of the width, so all modes (incl. SLO-MO and QR)
+            // always fit on screen, whatever the phone's width, display size or font size.
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Mode.entries.filter { it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO }.forEach { m ->
-                    Text(
-                        m.label,
-                        color = if (ui.mode == m) Accent else Color.White.copy(alpha = 0.7f),
-                        fontWeight = if (ui.mode == m) FontWeight.Bold else FontWeight.Normal,
-                        fontSize = 14.sp,
-                        modifier = Modifier
-                            .clickable(enabled = !ui.recording) { engine.setMode(m) }
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
+                    val on = ui.mode == m
+                    Column(
+                        Modifier.weight(1f).clickable(enabled = !ui.recording) { engine.setMode(m) }
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            m.label,
+                            color = if (on) Color.White else Color.White.copy(alpha = 0.45f),
+                            fontFamily = Dot,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Clip,
+                            textAlign = TextAlign.Center,
+                        )
+                        // Nothing-style red dot under the active mode
+                        Box(
+                            Modifier.padding(top = 4.dp).size(5.dp).clip(CircleShape)
+                                .background(if (on) Accent else Color.Transparent)
+                        )
+                    }
                 }
             }
         }
@@ -342,24 +358,24 @@ private fun TopBar(
                     ImageCapture.FLASH_MODE_AUTO -> "⚡ Auto"
                     else -> "⚡ Off"
                 }
-                Chip(label, ui.flash != ImageCapture.FLASH_MODE_OFF) { engine.cycleFlash() }
+                Chip(label, ui.flash != ImageCapture.FLASH_MODE_OFF, compact = true) { engine.cycleFlash() }
             } else if (ui.front) {
                 // No physical flash on this camera (typical for a front camera): flash the screen instead.
-                Chip(if (ui.screenFlash) "💡 Screen flash: On" else "💡 Screen flash: Off", ui.screenFlash) {
+                Chip(if (ui.screenFlash) "💡 Flash: On" else "💡 Flash: Off", ui.screenFlash, compact = true) {
                     engine.toggleScreenFlash()
                 }
             }
-            Chip(if (ui.timer == 0) "⏱ Off" else "⏱ ${ui.timer}s", ui.timer != 0) { engine.cycleTimer() }
-            Chip(if (ui.burst == 1) "Burst 1" else "Burst ${ui.burst}", ui.burst != 1) { engine.cycleBurst() }
+            Chip(if (ui.timer == 0) "⏱ Off" else "⏱ ${ui.timer}s", ui.timer != 0, compact = true) { engine.cycleTimer() }
+            Chip(if (ui.burst == 1) "Burst 1" else "Burst ${ui.burst}", ui.burst != 1, compact = true) { engine.cycleBurst() }
         } else if (ui.hasFlash) {
-            Chip(if (ui.torch) "🔦 On" else "🔦 Off", ui.torch) { engine.toggleTorch() }
+            Chip(if (ui.torch) "🔦 On" else "🔦 Off", ui.torch, compact = true) { engine.toggleTorch() }
         } else if (ui.front && ui.mode.isVideo) {
             // Continuous fill light for front-camera video: brightens the screen instead of a torch.
-            Chip(if (ui.torch) "💡 Screen light: On" else "💡 Screen light: Off", ui.torch) { engine.toggleTorch() }
+            Chip(if (ui.torch) "💡 Light: On" else "💡 Light: Off", ui.torch, compact = true) { engine.toggleTorch() }
         }
-        Chip("▦ $gridLabel", false, onClick = onSettings)
-        Chip("⚙", false, onClick = onSettings)
-        Chip("ⓘ", false, onClick = onInfo)
+        // Grid lives in Settings; the top bar keeps only quick toggles so it fits narrow screens
+        Chip("⚙", false, compact = true, onClick = onSettings)
+        Chip("ⓘ", false, compact = true, onClick = onInfo)
     }
 }
 
@@ -375,11 +391,11 @@ private fun LensRow(ui: CamUi, engine: CameraEngine) {
     ) {
         zooms.forEach { z ->
             val active = abs(ui.zoom - z) < z * 0.05f
-            Chip(if (z < 1f) "%.1f×".format(z) else "${z.roundToInt()}×", active) { engine.setZoom(z) }
+            Chip(if (z < 1f) "%.1f×".format(z) else "${z.roundToInt()}×", active, dot = true) { engine.setZoom(z) }
         }
         if (lenses.size > 1) {
             Text("│", color = Color.Gray)
-            lenses.forEach { l -> Chip(l.label, ui.lensId == l.id) { engine.selectLens(l.id) } }
+            lenses.forEach { l -> Chip(l.label, ui.lensId == l.id, dot = true) { engine.selectLens(l.id) } }
         }
     }
 }
@@ -391,7 +407,7 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
         return
     }
     val inner = when {
-        ui.mode.isVideo -> Color(0xFFFF3B30)
+        ui.mode.isVideo -> Accent
         ui.busy -> Color(0xFFFFB300)
         else -> Color.White
     }
@@ -424,7 +440,7 @@ private fun FocusRingView(ui: CamUi, engine: CameraEngine) {
         Modifier
             .offset { IntOffset(ring.x.roundToInt() - half, ring.y.roundToInt() - half) }
             .size(72.dp)
-            .border(2.dp, Accent, CircleShape),
+            .border(2.dp, Color.White, CircleShape),
     )
 }
 

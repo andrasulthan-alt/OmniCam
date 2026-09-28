@@ -25,6 +25,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.foundation.border
+import app.omnicam.R
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,16 +37,22 @@ import app.omnicam.model.GridType
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
-val Accent = Color(0xFF4DD0E1)
-val PanelBg = Color(0x99000000)
+// Nothing-inspired palette: pure black, white, one red accent.
+val Accent = Color(0xFFD71921)
+val PanelBg = Color(0xB3000000)
+
+/** Dot-matrix display face (Doto, SIL OFL 1.1), subset to Latin + digits to stay small. */
+val Dot = FontFamily(Font(R.font.doto))
 
 @Composable
 fun OmniTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Accent,
-            background = Color(0xFF0B0F14),
-            surface = Color(0xFF12181F),
+            onPrimary = Color.White,
+            secondaryContainer = Color(0xFF2A2A2A),
+            background = Color.Black,
+            surface = Color(0xFF0E0E0E),
             onSurface = Color.White,
         ),
         content = content,
@@ -54,20 +64,27 @@ fun Chip(
     text: String,
     selected: Boolean = false,
     enabled: Boolean = true,
+    compact: Boolean = false,
+    dot: Boolean = false,
     onClick: () -> Unit,
 ) {
-    val bg = if (selected) Accent else Color(0x33FFFFFF)
+    // Nothing-style pills: selected = solid white with black text, otherwise a thin outline
+    val bg = if (selected) Color.White else Color(0x1FFFFFFF)
     val fg = if (selected) Color.Black else Color.White
     Text(
         text = text,
         color = if (enabled) fg else fg.copy(alpha = 0.4f),
-        fontSize = 13.sp,
+        fontSize = if (compact) 12.sp else 13.sp,
         fontWeight = FontWeight.Medium,
+        fontFamily = if (dot) Dot else null,
+        maxLines = 1,
+        softWrap = false,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .background(bg)
+            .border(1.dp, if (selected) Color.White else Color(0x40FFFFFF), RoundedCornerShape(50))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = if (compact) 10.dp else 12.dp, vertical = if (compact) 6.dp else 7.dp),
     )
 }
 
@@ -85,7 +102,7 @@ fun LabeledSlider(
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = Color.White.copy(alpha = if (enabled) 0.8f else 0.4f), fontSize = 12.sp)
-            Text(valueText, color = if (enabled) Accent else Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(valueText, color = if (enabled) Color.White else Color.Gray, fontSize = 13.sp, fontFamily = Dot)
         }
         Slider(
             value = value.coerceIn(valueRange.start, valueRange.endInclusive),
