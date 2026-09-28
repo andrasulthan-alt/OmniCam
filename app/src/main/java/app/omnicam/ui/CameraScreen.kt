@@ -25,6 +25,8 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -43,6 +45,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -98,6 +101,12 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     // since before that the full preview is more useful for lining up the shot.
     val whiteLightMode = screenLightOn && ui.recording
     ScreenBrightnessBoost(active = screenFlashActive || screenLightOn)
+    // Keep the screen on while recording: a long time-lapse must not be cut off by the screen timeout
+    val hostView = LocalView.current
+    DisposableEffect(ui.recording) {
+        hostView.keepScreenOn = ui.recording
+        onDispose { hostView.keepScreenOn = false }
+    }
     val settings by prefs.settings.collectAsState()
 
     var showSettings by remember { mutableStateOf(false) }
@@ -178,7 +187,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
 
             // iPhone-style brightness bar (PHOTO / VIDEO / SLO-MO; PRO has its own EV slider)
             val evRanges = ui.ranges
-            val evModeOk = ui.mode == Mode.PHOTO || ui.mode.isVideo
+            val evModeOk = ui.mode == Mode.PHOTO || ui.mode == Mode.THREE_D || ui.mode.isVideo
             if (evModeOk && !whiteLightMode && evRanges != null && evRanges.evSupported &&
                 evRanges.evMax > evRanges.evMin && (showEvBar || ui.ev != 0)
             ) {
@@ -207,6 +216,19 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                         .clip(RoundedCornerShape(6.dp)).background(PanelBg).padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
+            // D3D: "hold still" while the depth sensor is read, then a short "processing" state
+            if (ui.mode == Mode.THREE_D && (ui.wiggleProgress >= 0 || ui.wiggleProcessing)) {
+                Column(
+                    Modifier.align(Alignment.Center).clip(RoundedCornerShape(16.dp)).background(PanelBg)
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        if (ui.wiggleProcessing) "MAKING 3D…" else "HOLD STILL",
+                        color = Color.White, fontSize = 20.sp, fontFamily = Dot,
+                    )
+                }
+            }
             if (ui.countdown > 0) {
                 Text(
                     "${ui.countdown}", color = Color.White, fontSize = 96.sp, fontFamily = Dot,
@@ -214,8 +236,12 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 )
             }
             if (ui.recording) {
+                // Time-lapse: real time recorded, plus the automatic speed and the clip length so far
+                val lapseInfo = if (ui.mode == Mode.TIMELAPSE) {
+                    "  ${ui.lapseSpeed}×  ${formatTime(ui.lapseFrames * 1000L / 30)}"
+                } else ""
                 Text(
-                    (if (ui.paused) "⏸ " else "● ") + formatTime(ui.recordedMs),
+                    (if (ui.paused) "⏸ " else "● ") + formatTime(ui.recordedMs) + lapseInfo,
                     color = Accent, fontSize = 16.sp, fontFamily = Dot,
                     modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 44.dp)
                         .clip(RoundedCornerShape(50)).background(PanelBg).padding(horizontal = 12.dp, vertical = 4.dp),
@@ -250,6 +276,8 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                         else engine.setMic(on)
                     }
                     Mode.SLOWMO -> SlowMoPanel(ui, engine)
+                    Mode.TIMELAPSE -> TimelapsePanel(ui)
+                    Mode.THREE_D -> ThreeDPanel()
                     else -> {}
                 }
             }
@@ -273,17 +301,30 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 ) { Text("⟲", color = Color.White, fontSize = 24.sp) }
             }
 
-            // Mode picker: every tab gets an equal share of the width, so all modes (incl. SLO-MO and QR)
-            // always fit on screen, whatever the phone's width, display size or font size.
+            // Mode picker: spreads evenly when the tabs fit, and scrolls sideways (keeping the active mode
+            // in view) on narrow screens or with large display/font sizes, so no mode is ever cut off.
+            val modes = Mode.entries.filter {
+                (it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO) &&
+                    (it != Mode.THREE_D || (ui.depthOk && !ui.front))
+            }
+            val modeScroll = rememberScrollState()
+            LaunchedEffect(ui.mode, modeScroll.maxValue) {
+                val i = modes.indexOf(ui.mode)
+                if (i >= 0 && modes.size > 1 && modeScroll.maxValue > 0) {
+                    modeScroll.animateScrollTo(modeScroll.maxValue * i / (modes.size - 1))
+                }
+            }
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                Modifier.horizontalScroll(modeScroll).widthIn(min = maxWidth).padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Mode.entries.filter { it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO }.forEach { m ->
+                modes.forEach { m ->
                     val on = ui.mode == m
                     Column(
-                        Modifier.weight(1f).clickable(enabled = !ui.recording) { engine.setMode(m) }
-                            .padding(vertical = 8.dp),
+                        Modifier.clickable(enabled = !ui.recording) { engine.setMode(m) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Text(
@@ -303,6 +344,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                         )
                     }
                 }
+            }
             }
         }
 
@@ -414,7 +456,7 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
     val shape = if (ui.recording) RoundedCornerShape(14.dp) else CircleShape
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         // Pause/resume is not available for high-speed (slow-motion) recording
-        if (ui.recording && !(ui.mode == Mode.SLOWMO && ui.slowMo.camera2)) {
+        if (ui.recording && ui.mode != Mode.TIMELAPSE && !(ui.mode == Mode.SLOWMO && ui.slowMo.camera2)) {
             Box(
                 Modifier.size(44.dp).clip(CircleShape).background(Color(0x33FFFFFF)).clickable { engine.pauseResume() },
                 contentAlignment = Alignment.Center,

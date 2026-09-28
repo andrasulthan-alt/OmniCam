@@ -219,3 +219,22 @@ fun SlowMoPanel(ui: CamUi, engine: CameraEngine) {
         )
     }
 }
+
+/** TIME-LAPSE mode: no settings, like the iPhone. Speed adapts automatically. */
+@Composable
+fun TimelapsePanel(ui: CamUi) {
+    Text(
+        if (ui.recording) "Speed rises automatically the longer you record"
+        else "Auto speed · the finished clip stays about 20–40 s",
+        color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp,
+    )
+}
+
+/** D3D hint. */
+@Composable
+fun ThreeDPanel() {
+    Text(
+        "One tap · uses this phone's depth sensor · hold still for a second after the shot",
+        color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp,
+    )
+}
