@@ -413,7 +413,8 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
     }
     val shape = if (ui.recording) RoundedCornerShape(14.dp) else CircleShape
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        if (ui.recording) {
+        // Pause/resume is not available for high-speed (slow-motion) recording
+        if (ui.recording && !(ui.mode == Mode.SLOWMO && ui.slowMo.camera2)) {
             Box(
                 Modifier.size(44.dp).clip(CircleShape).background(Color(0x33FFFFFF)).clickable { engine.pauseResume() },
                 contentAlignment = Alignment.Center,
