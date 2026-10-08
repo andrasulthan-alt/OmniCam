@@ -112,6 +112,11 @@ private const val SHARE_4K_STREAM = false
 /** Largest default photo size, matching stock apps' binned 12 MP output (16:9 / 4:3 / 12.5 MP variants fit). */
 private const val STOCK_PHOTO_MAX_PIXELS = 16_800_000L
 
+/** Tap-to-focus: longest hold, and how far the phone must turn (radians, ~17°) to count as a new scene. */
+private const val TAP_HOLD_MAX_S = 60L
+private const val SCENE_TURN_RAD = 0.3
+private const val GYRO_NOISE_RAD_S = 0.05
+
 /** Slow motion: gap after CameraX releases the camera, and the delay before an automatic retry. */
 private const val HS_OPEN_GAP_MS = 600L
 private const val HS_RETRY_DELAY_MS = 900L
@@ -263,10 +268,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun detach() {
         orientation.disable()
+        stopSceneWatch()
     }
 
     fun release() {
         orientation.disable()
+        stopSceneWatch()
         recording?.stop()
         scope.cancel()
         io.shutdown()
@@ -1045,11 +1052,60 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val cam = camera ?: return
         val v = previewView ?: return
         if (ui.value.manual.focusManual && ui.value.mode == Mode.PRO) return
+        if (lapse.isRecording) return   // time-lapse keeps its own focus/white-balance lock
         val point = v.meteringPointFactory.createPoint(x, y)
+        // Like stock camera apps: the tapped point holds focus and brightness until the phone is turned to a
+        // new scene, then everything goes back to fully automatic (see watchSceneChange). Without a gyroscope
+        // the tap is released after 5 s instead.
+        val hasGyro = gyro != null
         cam.cameraControl.startFocusAndMetering(
-            FocusMeteringAction.Builder(point).setAutoCancelDuration(5, TimeUnit.SECONDS).build()
+            FocusMeteringAction.Builder(point)
+                .setAutoCancelDuration(if (hasGyro) TAP_HOLD_MAX_S else 5L, TimeUnit.SECONDS).build()
         )
         ui.update { it.copy(focusRing = FocusRing(x, y, System.nanoTime())) }
+        if (hasGyro) watchSceneChange()
+    }
+
+    // ── Auto brightness after a tap: release the tapped focus/exposure when the scene changes ──
+    private val sensors by lazy { app.getSystemService(android.hardware.SensorManager::class.java) }
+    private val gyro by lazy { sensors?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) }
+    private var sceneListener: android.hardware.SensorEventListener? = null
+
+    private fun watchSceneChange() {
+        stopSceneWatch()
+        val sm = sensors ?: return
+        val g = gyro ?: return
+        var turned = 0.0
+        var lastNs = 0L
+        val l = object : android.hardware.SensorEventListener {
+            override fun onSensorChanged(e: android.hardware.SensorEvent) {
+                if (lastNs != 0L) {
+                    val dt = (e.timestamp - lastNs) / 1e9
+                    val w = kotlin.math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
+                    if (w > GYRO_NOISE_RAD_S) turned += w * dt   // ignore sensor noise and hand tremor
+                }
+                lastNs = e.timestamp
+                if (turned >= SCENE_TURN_RAD) mainHandler.post { releaseTapMetering() }
+            }
+            override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) {}
+        }
+        sceneListener = l
+        sm.registerListener(l, g, android.hardware.SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    private fun stopSceneWatch() {
+        sceneListener?.let { runCatching { sensors?.unregisterListener(it) } }
+        sceneListener = null
+    }
+
+    /** The phone was turned to a new scene: back to continuous autofocus and auto exposure, brightness reset. */
+    private fun releaseTapMetering() {
+        if (sceneListener == null) return
+        stopSceneWatch()
+        if (lapse.isRecording) return
+        camera?.cameraControl?.cancelFocusAndMetering()
+        if (ui.value.mode != Mode.PRO && ui.value.ev != 0) setQuickEv(0)
+        ui.update { it.copy(focusRing = null) }
     }
 
     fun clearFocusRing() { ui.update { it.copy(focusRing = null) } }
@@ -1095,6 +1151,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
      */
     private fun lockForTimelapse(lock: Boolean) {
         val cam = camera ?: return
+        if (lock) stopSceneWatch()
         runCatching {
             if (lock) {
                 val centre = androidx.camera.core.SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
