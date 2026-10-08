@@ -70,7 +70,7 @@ fun formatShutter(ns: Long): String {
     if (ns <= 0) return "—"
     val sec = ns / 1_000_000_000.0
     return if (sec >= 0.5) {
-        if (sec >= 10) "${sec.roundToInt()}s" else "%.1fs".format(sec)
+        if (sec >= 10) "${sec.roundToInt()}s" else "%.1fs".format(java.util.Locale.US, sec)
     } else {
         "1/${(1.0 / sec).roundToInt()}"
     }
