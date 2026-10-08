@@ -3,6 +3,11 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
   apk:
@@ -48,6 +53,17 @@ jobs:
           name: omnicam-release-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # Publishing a GitHub release attaches the signed APK to it automatically (OmniCam-<version>.apk)
+      - name: Attach APK to the GitHub release
+        if: github.event_name == 'release' && env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          APK="OmniCam-${TAG#v}.apk"
+          cp "$(ls app/build/outputs/apk/release/*.apk | head -n 1)" "$APK"
+          gh release upload "$TAG" "$APK" --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Build debug APK (no signing key configured)
         if: env.HAS_KEY != 'true'
