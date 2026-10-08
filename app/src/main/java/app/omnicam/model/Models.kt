@@ -150,8 +150,8 @@ data class VideoUi(
     val fps60Ok: Boolean = false,
     val hdr: Boolean = false,
     val hdrOk: Boolean = false,
-    /** Off by default; the user opts in. */
-    val stab: Boolean = false,
+    /** On by default like stock camera apps; turned off automatically if the phone rejects it. */
+    val stab: Boolean = true,
     val stabOk: Boolean = false,
     val mic: Boolean = true,
 )
