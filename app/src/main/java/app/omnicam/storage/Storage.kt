@@ -32,6 +32,8 @@ data class Settings(
     val volumeShutter: Boolean = true,
     val mirrorFront: Boolean = false,
     val qualityFirst: Boolean = true,
+    /** Off = ~12 MP binned photos like stock apps; on = the sensor's largest size. */
+    val fullResolution: Boolean = false,
     val grid: GridType = GridType.OFF,
     /** Indikator kemiringan horizon (sensor akselerometer) */
     val level: Boolean = true,
@@ -48,6 +50,7 @@ class Prefs(context: Context) {
         volumeShutter = sp.getBoolean("volume", true),
         mirrorFront = sp.getBoolean("mirror", false),
         qualityFirst = sp.getBoolean("quality", true),
+        fullResolution = sp.getBoolean("full_res", false),
         grid = runCatching { GridType.valueOf(sp.getString("grid", null) ?: "OFF") }
             .getOrDefault(GridType.OFF),
         level = sp.getBoolean("level", true),
@@ -63,6 +66,7 @@ class Prefs(context: Context) {
             .putBoolean("volume", n.volumeShutter)
             .putBoolean("mirror", n.mirrorFront)
             .putBoolean("quality", n.qualityFirst)
+            .putBoolean("full_res", n.fullResolution)
             .putString("grid", n.grid.name)
             .putBoolean("level", n.level)
             .apply()
@@ -120,7 +124,7 @@ object MediaOutput {
             put(MediaStore.MediaColumns.RELATIVE_PATH, DIR)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
-        val uri = cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        val uri = runCatching { cr.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) }.getOrNull() ?: return null
         val fd = runCatching { cr.openFileDescriptor(uri, "rw") }.getOrNull()
         if (fd == null) { runCatching { cr.delete(uri, null, null) }; return null }
         return uri to fd
