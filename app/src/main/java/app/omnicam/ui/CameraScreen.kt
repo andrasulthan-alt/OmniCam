@@ -24,6 +24,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -116,6 +119,9 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     LaunchedEffect(evTouch) {
         if (evTouch != 0L) { showEvBar = true; delay(3500); showEvBar = false }
     }
+    // Brightness slide: the full exposure range spans this much finger travel
+    val evDragPx = with(LocalDensity.current) { 320.dp.toPx() }
+    var evCarry by remember { mutableFloatStateOf(0f) }
     var showInfo by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
 
@@ -165,7 +171,24 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 .pointerInput(Unit) {
                     detectTapGestures(onTap = { engine.focusAt(it.x, it.y); evTouch = System.nanoTime() })
                 }
-                .pointerInput(Unit) { detectTransformGestures { _, _, zoom, _ -> if (zoom != 1f) engine.zoomBy(zoom) } },
+                .pointerInput(Unit) {
+                    // Pinch = zoom. One-finger slide up/down after a tap = brightness (like the iPhone camera)
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        if (zoom != 1f) { engine.zoomBy(zoom); evCarry = 0f; return@detectTransformGestures }
+                        val u = engine.ui.value   // live value: several slide events arrive between frames
+                        val r = u.ranges ?: return@detectTransformGestures
+                        val evOk = u.mode == Mode.PHOTO || u.mode.isVideo
+                        if (u.focusRing == null || !evOk || !r.evSupported || r.evMax <= r.evMin) return@detectTransformGestures
+                        val pxPerStep = evDragPx / (r.evMax - r.evMin)
+                        evCarry += -pan.y   // up = brighter
+                        val steps = (evCarry / pxPerStep).toInt()
+                        if (steps != 0) {
+                            evCarry -= steps * pxPerStep
+                            engine.setQuickEv((u.ev + steps).coerceIn(r.evMin, r.evMax))
+                        }
+                        evTouch = System.nanoTime()
+                    }
+                },
         ) {
             if (whiteLightMode) Box(Modifier.fillMaxSize().background(Color.White))
             val slowMoC2 = ui.mode == Mode.SLOWMO && ui.slowMo.camera2
@@ -187,21 +210,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 if (settings.level) LevelOverlay(Modifier.fillMaxSize())
             }
             if (ui.mode == Mode.PRO) ScopeOverlay(frame, Modifier.fillMaxSize())
-            if (!whiteLightMode) FocusRingView(ui, engine)
-
-            // iPhone-style brightness bar (PHOTO / VIDEO / SLO-MO; PRO has its own EV slider)
-            val evRanges = ui.ranges
-            val evModeOk = ui.mode == Mode.PHOTO || ui.mode.isVideo
-            if (evModeOk && !whiteLightMode && evRanges != null && evRanges.evSupported &&
-                evRanges.evMax > evRanges.evMin && (showEvBar || ui.ev != 0)
-            ) {
-                ExposureBar(
-                    ev = ui.ev, evMin = evRanges.evMin, evMax = evRanges.evMax, evStep = evRanges.evStep,
-                    onChange = { engine.setQuickEv(it) },
-                    onInteract = { evTouch = System.nanoTime() },
-                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
-                )
-            }
+            if (!whiteLightMode) FocusBox(ui, active = showEvBar)
 
             if (ui.mode == Mode.PRO && ui.scope.histogram) {
                 frame?.let {
@@ -463,17 +472,48 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
     }
 }
 
+/**
+ * iPhone-style focus box: a square at the tapped spot with a sun on a short line beside it. Sliding a finger
+ * up or down anywhere on the viewfinder moves the sun and changes the brightness. The box stays (dimmed when
+ * idle) until the phone is turned to a new scene or the hold ends.
+ */
 @Composable
-private fun FocusRingView(ui: CamUi, engine: CameraEngine) {
+private fun FocusBox(ui: CamUi, active: Boolean) {
     val ring = ui.focusRing ?: return
-    LaunchedEffect(ring.stamp) { delay(900); engine.clearFocusRing() }
-    val half = with(LocalDensity.current) { 36.dp.roundToPx() }
-    Box(
-        Modifier
-            .offset { IntOffset(ring.x.roundToInt() - half, ring.y.roundToInt() - half) }
-            .size(72.dp)
-            .border(2.dp, Color.White, CircleShape),
-    )
+    val r = ui.ranges
+    val evOk = (ui.mode == Mode.PHOTO || ui.mode.isVideo) && r != null && r.evSupported && r.evMax > r.evMin
+    val density = LocalDensity.current
+    val box = 72.dp
+    val line = 120.dp
+    val alpha = if (active) 1f else 0.5f
+    val half = with(density) { (box / 2).roundToPx() }
+    Box(Modifier.offset { IntOffset(ring.x.roundToInt() - half, ring.y.roundToInt() - half) }) {
+        Box(Modifier.size(box).border(1.5.dp, Color.White.copy(alpha = alpha), RoundedCornerShape(4.dp)))
+        if (evOk && r != null) {
+            val frac = (r.evMax - ui.ev).toFloat() / (r.evMax - r.evMin)   // 0 = brightest (top)
+            val lineTop = (box - line) / 2
+            // thin line beside the box, only while adjusting (the sun alone when idle)
+            if (active) {
+                Box(
+                    Modifier.offset(x = box + 13.dp, y = lineTop).width(1.dp).height(line)
+                        .background(Color.White.copy(alpha = 0.7f))
+                )
+            }
+            Text(
+                "☀", color = Color.White.copy(alpha = alpha), fontSize = 18.sp,
+                modifier = Modifier.offset(x = box + 4.dp, y = lineTop + line * frac - 12.dp),
+            )
+            if (ui.ev != 0) {
+                val v = ui.ev * r.evStep
+                Text(
+                    (if (v > 0) "+" else "") + "%.1f".format(java.util.Locale.US, v),
+                    color = Color.White.copy(alpha = alpha), fontSize = 12.sp, fontFamily = Dot,
+                    modifier = Modifier.offset(x = box + 26.dp, y = lineTop + line * frac - 9.dp)
+                        .clip(RoundedCornerShape(4.dp)).background(PanelBg).padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
+        }
+    }
 }
 
 @Composable
