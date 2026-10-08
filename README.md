@@ -86,8 +86,9 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   through the recording stream (CameraX stream sharing, tried in 0.3.6 and with a minimal custom GL copy) removes the
   tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
   converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
-- Tap to focus works like stock camera apps: the tapped spot holds focus and brightness until you turn the phone to a
-  new scene, then focus, exposure and the brightness slider go back to fully automatic.
+- Tap to focus works like the iPhone camera: a focus box with a sun appears at the tapped spot; slide a finger up or
+  down anywhere on the viewfinder to make the picture brighter or darker. The spot holds until you turn the phone to a
+  new scene, then focus and brightness go back to fully automatic.
 - Photos are saved at about 12 MP by default, like stock camera apps: 48/50/108 MP sensors combine several pixels
   into one, which gives less noise and better low light. "Full sensor resolution" in Settings saves the largest size.
 - Video stabilization is on by default (like stock camera apps) where the device supports it, and is turned off
