@@ -70,7 +70,7 @@ and digits (about 50 KB). OmniCam is not affiliated with Nothing Technology.
 | Device | Android | Result |
 |---|---|---|
 | Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work; 4K records a steady 30 fps (viewfinder tears while recording 4K, see known issues). |
-| Samsung Galaxy S20 Ultra (SM-G988B), stock One UI | 13 | Viewfinder reported blurry; fix pending confirmation (0.3.3). |
+| Samsung Galaxy S20 Ultra (SM-G988B), PixelOS custom ROM (earlier: stock One UI 13) | 16 | On One UI: blurry viewfinder (fixed in 0.3.3), vendor modes froze (removed in 0.4.3), slow motion unreliable. Now on PixelOS: 0.4.5 under test. |
 | Huawei P50 Pro, HarmonyOS (Android 12 base) | 12 | 0.3.9: black viewfinder after SLO-MO and cut-off QR tab fixed (confirmed). SLO-MO itself froze and recordings failed; 0.3.10 follows Google's official preview-only / recording-session flow, retries at a lower frame rate or with a compatibility recorder, and otherwise hides SLO-MO on that phone. |
 
 Tested it on another device? Open an issue with the output of **Copy report**.
