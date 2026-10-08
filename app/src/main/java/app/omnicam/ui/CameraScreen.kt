@@ -139,8 +139,8 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         engine.setMic(ok)
     }
-    val locLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        prefs.update { it.copy(geotag = ok) }
+    val locLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
+        prefs.update { it.copy(geotag = res.values.any { granted -> granted }) }
     }
 
     LaunchedEffect(Unit) {
@@ -165,8 +165,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
         Box(
             Modifier
                 .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .aspectRatio(ratio)
+                .aspectRatio(ratio, matchHeightConstraintsFirst = true)
                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
                 .pointerInput(Unit) {
                     detectTapGestures(onTap = { engine.focusAt(it.x, it.y); evTouch = System.nanoTime() })
@@ -264,6 +263,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .background(Color.Black.copy(alpha = 0.72f))
+                .pointerInput(Unit) { detectTapGestures { } }   // empty space here must not focus the viewfinder below
                 .navigationBarsPadding()
                 .padding(top = 8.dp, bottom = 6.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -361,8 +361,9 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
             onChange = { block -> prefs.update(block) },
             onGeotag = { on ->
                 if (!on) prefs.update { it.copy(geotag = false) }
-                else if (ctx.has(Manifest.permission.ACCESS_FINE_LOCATION)) prefs.update { it.copy(geotag = true) }
-                else locLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                else if (ctx.has(Manifest.permission.ACCESS_FINE_LOCATION) || ctx.has(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                    prefs.update { it.copy(geotag = true) }
+                } else locLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
             },
             onInfo = { showSettings = false; showInfo = true },
         )
@@ -431,7 +432,7 @@ private fun LensRow(ui: CamUi, engine: CameraEngine) {
     ) {
         zooms.forEach { z ->
             val active = abs(ui.zoom - z) < z * 0.05f
-            Chip(if (z < 1f) "%.1f×".format(z) else "${z.roundToInt()}×", active, dot = true) { engine.setZoom(z) }
+            Chip(if (z < 1f) "%.1f×".format(java.util.Locale.US, z) else "${z.roundToInt()}×", active, dot = true) { engine.setZoom(z) }
         }
         if (lenses.size > 1) {
             Text("│", color = Color.Gray)

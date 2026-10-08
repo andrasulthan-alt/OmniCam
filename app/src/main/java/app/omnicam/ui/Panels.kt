@@ -15,6 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -69,7 +71,13 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
         Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        // Spread evenly when the tabs fit; scroll sideways with large font sizes instead of clipping "EXPOSURE"
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()).widthIn(min = maxWidth),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             ProSection.entries.forEach { sec ->
                 val on = section == sec
                 Text(
@@ -81,9 +89,10 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
                     softWrap = false,
                     overflow = TextOverflow.Clip,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f).clickable { section = sec }.padding(vertical = 6.dp),
+                    modifier = Modifier.clickable { section = sec }.padding(horizontal = 8.dp, vertical = 6.dp),
                 )
             }
+        }
         }
 
         when (section) {
@@ -106,7 +115,7 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
                     if (r.evSupported && r.evMax > r.evMin) {
                         LabeledSlider(
                             label = "EV compensation",
-                            valueText = "%+.1f".format(m.evIndex * r.evStep),
+                            valueText = "%+.1f".format(java.util.Locale.US, m.evIndex * r.evStep),
                             value = m.evIndex.toFloat(),
                             valueRange = r.evMin.toFloat()..r.evMax.toFloat(),
                             steps = (r.evMax - r.evMin - 1).coerceAtLeast(0),
