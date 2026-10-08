@@ -77,7 +77,10 @@ Tested it on another device? Open an issue with the output of **Copy report**.
   through the recording stream (CameraX stream sharing, tried in 0.3.6 and with a minimal custom GL copy) removes the
   tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
   converted again for the video encoder. OmniCam therefore keeps the plain path: smooth 30 fps recordings first.
-- Video stabilization is only offered when the device reports support.
+- Photos are saved at about 12 MP by default, like stock camera apps: 48/50/108 MP sensors combine several pixels
+  into one, which gives less noise and better low light. "Full sensor resolution" in Settings saves the largest size.
+- Video stabilization is on by default (like stock camera apps) where the device supports it, and is turned off
+  automatically if the phone rejects it.
 - Vendor modes (HDR / Night / Portrait from the phone maker) were removed in 0.4.3: on tested Samsung phones they froze
   the camera even when run with the phone's own settings only. PHOTO uses the phone's normal image processing.
 - Slow motion: high-speed recording by third-party apps is known to be unreliable on many Samsung models (reported for
