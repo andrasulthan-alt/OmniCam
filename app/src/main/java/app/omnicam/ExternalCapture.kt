@@ -56,10 +56,11 @@ object ExternalCapture {
         if (r.video) {
             result.data = saved
         } else {
-            runCatching { cr.loadThumbnail(saved, Size(640, 640), null) }.getOrNull()
+            runCatching { cr.loadThumbnail(saved, Size(256, 256), null) }.getOrNull()   // must fit the ~1 MB result limit
                 ?.let { result.putExtra("data", it) }
             result.data = saved
         }
+        result.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)   // the caller may open the returned file
         return Activity.RESULT_OK to result
     }
 }

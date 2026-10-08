@@ -34,6 +34,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import app.omnicam.model.Mode
@@ -90,7 +92,23 @@ class MainActivity : ComponentActivity() {
                             PackageManager.PERMISSION_GRANTED
                     )
                 }
-                val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+                val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+                    granted = ok
+                    // Denied for good ("don't ask again"): the system shows no dialog any more, so open the
+                    // app's settings page where camera access can be turned on.
+                    if (!ok && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+                        runCatching {
+                            startActivity(
+                                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+                            )
+                        }
+                    }
+                }
+                // Coming back from system settings with camera access granted: show the camera right away
+                LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+                    granted = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED
+                }
                 if (granted) {
                     CameraScreen(vm.engine, vm.prefs)
                 } else {
