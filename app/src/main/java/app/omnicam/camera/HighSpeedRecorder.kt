@@ -305,7 +305,11 @@ class HighSpeedRecorder(private val ctx: Context) {
             runCatching { session?.stopRepeating() }
             runCatching { session?.close() }
             session = null
-            val rec = recorderSurface!!
+            val rec = recorderSurface ?: run {
+                releaseRecorder(discard = true)
+                mainHandler.post { onResult("camera") }
+                return@post
+            }
             createSession(gen, listOf(prev, rec)) { ok ->
                 if (!ok) {
                     releaseRecorder(discard = true)
@@ -334,7 +338,7 @@ class HighSpeedRecorder(private val ctx: Context) {
     }
 
     /** Stops the recorder and closes the recording session. Returns the saved video, or null. */
-    private fun finishTake(): Uri? {
+    @Synchronized private fun finishTake(): Uri? {
         val r = recorder ?: return null
         val uri = pendingUri
         runCatching { session?.stopRepeating() }

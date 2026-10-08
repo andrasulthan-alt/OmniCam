@@ -77,6 +77,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -105,6 +108,9 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalCamera2Interop::class)
 /** See the comment at the stream-sharing decision in tryBind(). */
 private const val SHARE_4K_STREAM = false
+
+/** Largest default photo size, matching stock apps' binned 12 MP output (16:9 / 4:3 / 12.5 MP variants fit). */
+private const val STOCK_PHOTO_MAX_PIXELS = 16_800_000L
 
 /** Slow motion: gap after CameraX releases the camera, and the delay before an automatic retry. */
 private const val HS_OPEN_GAP_MS = 600L
@@ -237,6 +243,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             // the camera even with the phone's own settings. PHOTO uses the phone's normal processing.
             ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
             rebind()
+            scope.launch {
+                prefs.settings.map { it.fullResolution }.distinctUntilChanged().drop(1).collect { rebind() }
+            }
         }, mainExec)
     }
 
@@ -359,7 +368,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
             } else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
 
-            // Video stabilization (off by default). Preferred: preview stabilization, which stabilizes the
+            // Video stabilization (on by default, like stock camera apps). Preferred: preview stabilization, which stabilizes the
             // viewfinder and the recording with the same crop. Fallback: video-only EIS.
             val videoCaps = if (s.mode == Mode.VIDEO) Recorder.getVideoCapabilities(info) else null
             val previewStabOk = s.mode == Mode.VIDEO &&
@@ -392,9 +401,19 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     newFormat = if (s.format in allowed) s.format else PhotoFormat.JPEG
                     activeFormat = newFormat
 
+                    // Stock camera apps save ~12 MP by default even on 48/50/108 MP sensors: those sensors
+                    // combine 4 or 9 pixels into one (binning), which gives far less noise and better
+                    // dynamic range than the full-size readout. OmniCam does the same unless the user
+                    // turns on "Full sensor resolution" in Settings.
+                    val fullRes = prefs.settings.value.fullResolution
                     val highRes = ResolutionSelector.Builder()
                         .setAspectRatioStrategy(ratio)
                         .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                        .apply {
+                            if (!fullRes) setResolutionFilter { sizes, _ ->
+                                sizes.filter { it.width.toLong() * it.height <= STOCK_PHOTO_MAX_PIXELS }.ifEmpty { sizes }
+                            }
+                        }
                         .build()
                     val ic = ImageCapture.Builder()
                         .setCaptureMode(
@@ -625,7 +644,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     if (!hsOpenRetried) {
                         // One quiet retry: the first open often races the camera being released
                         hsOpenRetried = true
-                        hs.close()
+                        closeHighSpeed()
                         hs.whenClosed { scope.launch { delay(HS_RETRY_DELAY_MS); openHighSpeedIfReady() } }
                     } else {
                         // Never leave the user on a black screen, and do not offer it again on this phone
@@ -677,13 +696,16 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         hsWatchdog = null
         hsTicker?.cancel()
         hsTicker = null
-        if (hs.isRecording) ui.update { it.copy(recording = false, recordedMs = 0) }
+        if (hs.isRecording || (hs.isActive && ui.value.busy)) {
+            ui.update { it.copy(recording = false, busy = false, recordedMs = 0) }
+        }
         hs.close()   // finalizes a running take
 
     }
 
     private fun toggleHighSpeedRecording() {
         if (hs.isRecording) {
+            if (ui.value.busy) return   // a stop is already in progress
             hsTicker?.cancel()
             hsTicker = null
             if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
@@ -1230,9 +1252,15 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                             else -> "error"
                         }
                         toast("Recording stopped: $reason (code ${ev.error})")
-                        // Rekaman gagal tetap bisa menyisakan file kosong di galeri
-                        runCatching { ev.outputResults.outputUri.takeIf { it != android.net.Uri.EMPTY }
-                            ?.let { app.contentResolver.delete(it, null, null) } }
+                        // These stops still leave a playable file (CameraX docs): keep it. Only other errors
+                        // leave an empty or broken file, which is removed from the gallery.
+                        val out = ev.outputResults.outputUri.takeIf { it != android.net.Uri.EMPTY }
+                        val playable = ev.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
+                            ev.error == VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE ||
+                            ev.error == VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED ||
+                            ev.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
+                        if (playable && out != null) ui.update { it.copy(lastUri = out) }
+                        else runCatching { out?.let { app.contentResolver.delete(it, null, null) } }
                     }
                     else ui.update { it.copy(lastUri = ev.outputResults.outputUri) }
                 }
