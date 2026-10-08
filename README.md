@@ -6,6 +6,15 @@ the phone's own image processing for clean, natural results. OmniCam combines id
 FreeDcam, Fossify Camera, MA Camera, Libre Camera and CameraX Info into one app. The code is written from scratch in
 Kotlin with Jetpack Compose, CameraX and Camera2 interop.
 
+<p align="center">
+  <img src="docs/screenshots/1-photo.png" width="19%" alt="PHOTO mode">
+  <img src="docs/screenshots/2-pro.png" width="19%" alt="PRO mode with manual ISO and shutter">
+  <img src="docs/screenshots/3-video.png" width="19%" alt="VIDEO mode while recording">
+  <img src="docs/screenshots/4-slomo.png" width="19%" alt="SLO-MO mode at 240 fps">
+  <img src="docs/screenshots/5-settings.png" width="19%" alt="Settings">
+</p>
+<p align="center"><sub>PHOTO · PRO · VIDEO · SLO-MO · Settings (interface previews rendered from the app's UI; the scenes are illustrations)</sub></p>
+
 > **Status: early test build.** OmniCam builds successfully but has only been tested on one device so far.
 > Expect bugs, especially in RAW capture, slow motion and manual controls. Please report issues.
 
