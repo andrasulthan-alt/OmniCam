@@ -18,5 +18,5 @@ copied into a GPLv3 project).
 Dependencies: AndroidX / CameraX / Jetpack Compose (Apache-2.0), ZXing (Apache-2.0), Kotlin (Apache-2.0).
 
 Font: Doto by Óliver Lalan (https://github.com/oliverlalan/Doto), SIL Open Font License 1.1.
-Bundled as app/src/main/res/font/doto.ttf (a static, subset instance). Full license: FONT-LICENSE-Doto-OFL.txt.
+Bundled as app/src/main/res/font/doto.ttf (a static, subset instance). Full license: licenses/Doto-OFL.txt.
 The launcher icon is an original design; it contains no third-party marks.
