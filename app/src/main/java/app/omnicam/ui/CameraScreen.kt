@@ -137,7 +137,11 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
         prefs.update { it.copy(geotag = ok) }
     }
 
-    LaunchedEffect(Unit) { engine.start() }
+    LaunchedEffect(Unit) {
+        engine.start()
+        // Mic shows "on" by default: without the permission the video would be silent, so show it as off
+        if (!ctx.has(Manifest.permission.RECORD_AUDIO)) engine.setMic(false)
+    }
     DisposableEffect(owner) {
         engine.attach(owner, previewView)
         onDispose { engine.detach() }

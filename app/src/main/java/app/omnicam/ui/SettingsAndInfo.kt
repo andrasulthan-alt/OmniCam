@@ -83,6 +83,11 @@ fun SettingsSheet(
             SwitchRow("Volume keys = shutter", "Press a volume key to take a photo or record.", settings.volumeShutter) { on -> onChange { it.copy(volumeShutter = on) } }
             SwitchRow("Mirror front camera photos", "Selfies are saved flipped, like the preview.", settings.mirrorFront) { on -> onChange { it.copy(mirrorFront = on) } }
             SwitchRow("Prioritize quality", "Off = prioritize speed (minimum latency).", settings.qualityFirst) { on -> onChange { it.copy(qualityFirst = on) } }
+            SwitchRow(
+                "Full sensor resolution",
+                "Off = 12 MP like the stock camera: less noise, better in low light. On = the sensor's largest size (48/50/108 MP), only good in bright light.",
+                settings.fullResolution,
+            ) { on -> onChange { it.copy(fullResolution = on) } }
 
             Chip("ⓘ  Camera info & device capabilities", onClick = onInfo)
             Box(Modifier.padding(bottom = 16.dp))
