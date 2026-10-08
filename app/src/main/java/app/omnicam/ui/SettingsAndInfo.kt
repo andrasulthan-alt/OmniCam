@@ -6,6 +6,7 @@ package app.omnicam.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,7 +56,9 @@ fun SettingsSheet(
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp),
+            // Scrollable: on tall-font or small screens the lower rows were cut off
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .navigationBarsPadding().padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text("Settings", fontSize = 20.sp, fontWeight = FontWeight.Bold)
