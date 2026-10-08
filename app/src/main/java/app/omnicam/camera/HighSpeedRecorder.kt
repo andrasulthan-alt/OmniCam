@@ -292,7 +292,9 @@ class HighSpeedRecorder(private val ctx: Context) {
     fun startRecording(onResult: (String?) -> Unit) {
         val h = handler ?: return onResult("camera")
         val gen = generation
-        h.post {
+        // Everything that touches the recorder holds the same lock as close(): MediaRecorder is not
+        // thread-safe, and close() can run on the main thread while a start is in progress here.
+        val posted = h.post { synchronized(this@HighSpeedRecorder) {
             val prev = previewSurface
             if (gen != generation || device == null || prev == null) {
                 mainHandler.post { onResult("camera") }
@@ -310,7 +312,13 @@ class HighSpeedRecorder(private val ctx: Context) {
                 mainHandler.post { onResult("camera") }
                 return@post
             }
-            createSession(gen, listOf(prev, rec)) { ok ->
+            createSession(gen, listOf(prev, rec)) { ok -> synchronized(this@HighSpeedRecorder) {
+                if (gen != generation) {
+                    // close() ran meanwhile: it already released the camera; drop the half-made take
+                    releaseRecorder(discard = true)
+                    mainHandler.post { onResult("camera") }
+                    return@createSession
+                }
                 if (!ok) {
                     releaseRecorder(discard = true)
                     restartPreview(gen)
@@ -322,19 +330,21 @@ class HighSpeedRecorder(private val ctx: Context) {
                 if (started) isRecording = true
                 else { releaseRecorder(discard = true); restartPreview(gen) }
                 mainHandler.post { onResult(if (started) null else "start") }
-            }
-        }
+            } }
+        } }
+        if (!posted) onResult("camera")   // camera thread already stopped (camera error)
     }
 
     /** Stops and finalizes the file, then restarts the preview. [onResult] gets the saved video or null. */
     fun stopRecording(onResult: (Uri?) -> Unit) {
         val h = handler ?: return onResult(finishTake())
         val gen = generation
-        h.post {
+        val posted = h.post {
             val uri = finishTake()
             restartPreview(gen)
             mainHandler.post { onResult(uri) }
         }
+        if (!posted) onResult(finishTake())   // camera thread already stopped: finalize here
     }
 
     /** Stops the recorder and closes the recording session. Returns the saved video, or null. */
@@ -376,7 +386,7 @@ class HighSpeedRecorder(private val ctx: Context) {
     }
 
     /** Releases the camera. Use [whenClosed] to know when CameraX may open it again. */
-    fun close() {
+    @Synchronized fun close() {
         generation++   // callbacks of the previous open request are now ignored
         if (isRecording) runCatching { finishTake() }
         runCatching { session?.close() }

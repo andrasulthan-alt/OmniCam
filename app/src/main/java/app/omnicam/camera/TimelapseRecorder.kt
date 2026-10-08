@@ -63,6 +63,7 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
     private var cacheFile: File? = null
     private var kept = ArrayList<Sample>()
     private var allKeyFrames = true
+    private var frameLimit = MAX_FRAMES
     private var frameIndex = 0L
     private var failed: String? = null
     private var configBytes: ByteArray? = null   // SPS/PPS, for encoders that never report an output format
@@ -87,12 +88,13 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
     }
 
     fun start() {
+        if (isRecording) return   // a quick double tap must not start a second clip
+        isRecording = true
         executor.execute {
             resetState()
             val f = File(ctx.cacheDir, "timelapse_${System.currentTimeMillis()}.h264")
             cacheFile = f
             cache = RandomAccessFile(f, "rw")
-            isRecording = true
         }
     }
 
@@ -103,6 +105,7 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
         kept = ArrayList()
         keptFrames = 0
         allKeyFrames = true
+        frameLimit = MAX_FRAMES
         frameIndex = 0
         failed = null
         outFormat = null
@@ -114,10 +117,11 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
 
     override fun analyze(image: ImageProxy) {
         try {
-            if (!isRecording || failed != null) return
+            if (!isRecording || failed != null || cache == null) return
             val now = SystemClock.elapsedRealtime()
             if (lastCaptureAt != 0L && now - lastCaptureAt < intervalMs) return
-            lastCaptureAt = now
+            // Keep an even rhythm (frame arrival delay must not add up), but resync after a long gap
+            lastCaptureAt = if (lastCaptureAt == 0L || now - lastCaptureAt >= 2 * intervalMs) now else lastCaptureAt + intervalMs
             val c = codec ?: createEncoder(image) ?: return
             val (ox, oy) = stabilise(image)
             deflickerLut(currentMeanLuma)
@@ -164,12 +168,17 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)   // 0 = every frame is a key frame
         }
         try {
-            c.configure(format(0), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            try {
+                c.configure(format(0), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e: Exception) {
+                c.reset()
+                c.configure(format(1), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+            c.start()
         } catch (e: Exception) {
-            c.reset()
-            c.configure(format(1), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            runCatching { c.release() }   // otherwise each failed attempt leaks a hardware encoder
+            throw e
         }
-        c.start()
         codec = c
         return c
     }
@@ -372,10 +381,14 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
 
     /** Keeps the clip between ~20 and 40 s: drop every other frame and double the interval. */
     private fun decimateIfNeeded() {
-        if (kept.size < MAX_FRAMES) return
+        if (kept.size < frameLimit) return
         if (allKeyFrames) {
             kept = ArrayList(kept.filterIndexed { i, _ -> i % 2 == 0 })
             keptFrames = kept.size
+        } else {
+            // This encoder does not make every frame a key frame, so frames cannot be dropped:
+            // allow another 40 s before doubling again (otherwise the interval would explode)
+            frameLimit += MAX_FRAMES
         }
         intervalMs *= 2
         speed = (intervalMs * OUTPUT_FPS / 1000).toInt()
@@ -439,11 +452,13 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
         if (kept.isEmpty()) return null
         val (uri, fd) = MediaOutput.newPendingVideo(ctx, MediaOutput.stamp(), "LAPSE") ?: return null
         var ok = false
+        var muxer: MediaMuxer? = null
         try {
-            val muxer = MediaMuxer(fd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            muxer.setOrientationHint(rotation)
-            val track = muxer.addTrack(format)
-            muxer.start()
+            val m = MediaMuxer(fd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = m
+            m.setOrientationHint(rotation)
+            val track = m.addTrack(format)
+            m.start()
             val f = cache!!
             val info = MediaCodec.BufferInfo()
             val buf = ByteBuffer.allocate(kept.maxOf { it.size })
@@ -452,12 +467,13 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
                 f.seek(s.offset); f.readFully(bytes)
                 buf.clear(); buf.put(bytes); buf.flip()
                 info.set(0, s.size, i * 1_000_000L / OUTPUT_FPS, if (s.key) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
-                muxer.writeSampleData(track, buf, info)
+                m.writeSampleData(track, buf, info)
             }
-            muxer.stop()
-            muxer.release()
+            m.stop()
+            m.release()
             ok = true
         } finally {
+            if (!ok) runCatching { muxer?.release() }
             runCatching { fd.close() }
             if (ok) MediaOutput.finishPendingVideo(ctx, uri) else runCatching { ctx.contentResolver.delete(uri, null, null) }
         }

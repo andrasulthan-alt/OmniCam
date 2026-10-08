@@ -249,7 +249,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
             rebind()
             scope.launch {
-                prefs.settings.map { it.fullResolution }.distinctUntilChanged().drop(1).collect { rebind() }
+                prefs.settings.map { it.fullResolution to it.qualityFirst }.distinctUntilChanged().drop(1).collect { rebind() }
             }
         }, mainExec)
     }
@@ -268,14 +268,15 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun detach() {
         orientation.disable()
-        stopSceneWatch()
-        tapTimeout?.cancel()
+        releaseTapMetering(force = true)
     }
 
     fun release() {
         orientation.disable()
         stopSceneWatch()
         recording?.stop()
+        zoomObserver?.let { zoomLive?.removeObserver(it) }
+        if (hs.isActive) runCatching { hs.close() }
         scope.cancel()
         io.shutdown()
         analysisExec.shutdown()
@@ -336,9 +337,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val v = previewView ?: return
         if (tryBind(p, o, v, withAnalysis = true) || tryBind(p, o, v, withAnalysis = false)) return
         // Some devices reject stabilized configurations; retry once without stabilization.
-        if (ui.value.video.stab) {
+        if (ui.value.mode == Mode.VIDEO && ui.value.video.stab) {
             ui.update { it.copy(video = it.video.copy(stab = false)) }
             if (tryBind(p, o, v, withAnalysis = false)) toast("Stabilization is not supported with these settings")
+            else ui.update { it.copy(video = it.video.copy(stab = true)) }   // stabilization was not the cause
         }
     }
 
@@ -366,7 +368,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val slowMoOk = c2Caps != null || cameraXSlowMo
             if (s.mode == Mode.SLOWMO) {
                 if (c2Caps != null) { enterCamera2SlowMo(p, c2Caps); return true }
-                if (cameraXSlowMo && bindSlowMo(p, o, v, selector, info)) return true
+                if (cameraXSlowMo && runCatching { bindSlowMo(p, o, v, selector, info) }.getOrDefault(false)) return true
                 toast("Slow motion is not supported by this camera")
                 ui.update { it.copy(mode = Mode.VIDEO, slowMoOk = false) }
                 return tryBind(p, o, v, withAnalysis)
@@ -418,7 +420,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         .setAspectRatioStrategy(ratio)
                         .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
                         .apply {
-                            if (!fullRes) setResolutionFilter { sizes, _ ->
+                            // The sensor's full size (e.g. 12000×9000 on 108 MP sensors) is only listed among
+                            // the high-resolution sizes, which CameraX skips unless asked to allow them.
+                            if (fullRes) setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+                            else setResolutionFilter { sizes, _ ->
                                 sizes.filter { it.width.toLong() * it.height <= STOCK_PHOTO_MAX_PIXELS }.ifEmpty { sizes }
                             }
                         }
@@ -687,7 +692,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             delay(1500)
             val s = ui.value
             val progressed = hs.framesSeen - before
-            if (s.mode != Mode.SLOWMO || !s.slowMo.camera2 || !hs.isActive || progressed >= 15) return@launch
+            if (s.mode != Mode.SLOWMO || !s.slowMo.camera2 || !hs.isActive || hs.isRecording || s.busy || progressed >= 15) return@launch
             val lower = s.slowMo.rates.filter { it < s.slowMo.fps }.maxOrNull()
             if (lower != null) {
                 toast("${s.slowMo.fps} fps is not working on this phone, trying $lower fps")
@@ -1007,7 +1012,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     fun selectLens(id: String) {
-        if (recording != null) return
+        if (recording != null || hs.isRecording || lapse.isRecording) return
         ui.update { it.copy(lensId = id, front = it.lenses.firstOrNull { l -> l.id == id }?.front ?: it.front) }
         rebind()
     }
@@ -1096,7 +1101,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     if (w > GYRO_NOISE_RAD_S) turned += w * dt   // ignore sensor noise and hand tremor
                 }
                 lastNs = e.timestamp
-                if (turned >= SCENE_TURN_RAD) mainHandler.post { releaseTapMetering() }
+                if (turned >= SCENE_TURN_RAD) {
+                    val me = this
+                    mainHandler.post { if (sceneListener === me) releaseTapMetering() }
+                }
             }
             override fun onAccuracyChanged(s: android.hardware.Sensor?, a: Int) {}
         }
@@ -1206,7 +1214,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     private fun capturePhoto() {
-        val ic = imageCapture ?: return
+        imageCapture ?: return
         if (captureJob?.isActive == true) {
             // Ketuk lagi saat hitung mundur = batal
             captureJob?.cancel()
@@ -1230,6 +1238,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     delay(250) // let the screen reach full brightness and auto-exposure adjust
                 }
                 repeat(s0.burst) {
+                    // The camera may have been flipped or changed during the countdown: use the current capture
+                    val ic = imageCapture ?: return@repeat
                     if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
                     takeOne(ic, activeFormat)
                 }

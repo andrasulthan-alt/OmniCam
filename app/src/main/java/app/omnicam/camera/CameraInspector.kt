@@ -30,7 +30,8 @@ object CameraInspector {
 
     fun inspect(ctx: Context): List<CameraReport> {
         val cm = ctx.getSystemService(CameraManager::class.java) ?: return emptyList()
-        return cm.cameraIdList.mapNotNull { id -> runCatching { report(cm, id) }.getOrNull() }
+        val ids = runCatching { cm.cameraIdList }.getOrElse { return emptyList() }   // camera service unavailable
+        return ids.mapNotNull { id -> runCatching { report(cm, id) }.getOrNull() }
     }
 
     private fun report(cm: CameraManager, id: String): CameraReport {
