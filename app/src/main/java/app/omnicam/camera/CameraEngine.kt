@@ -269,6 +269,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun detach() {
         orientation.disable()
         stopSceneWatch()
+        tapTimeout?.cancel()
     }
 
     fun release() {
@@ -992,6 +993,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun setMode(m: Mode) {
         if (recording != null || hs.isRecording || lapse.isRecording || m == ui.value.mode) return
+        releaseTapMetering(force = true)
         ui.update { it.copy(mode = m, torch = false, qr = null, manual = if (m == Mode.PRO) it.manual else it.manual.copy(exposureManual = false, focusManual = false, awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO, evIndex = 0)) }
         scopeFrame.value = null
         rebind()
@@ -999,7 +1001,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun flip() {
         if (recording != null || hs.isRecording || lapse.isRecording) return
-        ui.update { it.copy(front = !it.front, lensId = null, ev = 0) }
+        releaseTapMetering(force = true)
+        ui.update { it.copy(front = !it.front, lensId = null, ev = 0, focusRing = null) }
         rebind()
     }
 
@@ -1064,7 +1067,15 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         )
         ui.update { it.copy(focusRing = FocusRing(x, y, System.nanoTime())) }
         if (hasGyro) watchSceneChange()
+        // When the hold ends on its own, hide the focus box and go back to automatic brightness too
+        tapTimeout?.cancel()
+        tapTimeout = scope.launch {
+            delay((if (hasGyro) TAP_HOLD_MAX_S else 5L) * 1000)
+            releaseTapMetering(force = true)
+        }
     }
+
+    private var tapTimeout: Job? = null
 
     // ── Auto brightness after a tap: release the tapped focus/exposure when the scene changes ──
     private val sensors by lazy { app.getSystemService(android.hardware.SensorManager::class.java) }
@@ -1098,12 +1109,17 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         sceneListener = null
     }
 
-    /** The phone was turned to a new scene: back to continuous autofocus and auto exposure, brightness reset. */
-    private fun releaseTapMetering() {
-        if (sceneListener == null) return
+    /**
+     * The phone was turned to a new scene (or the hold timed out, or the mode changed): back to continuous
+     * autofocus and auto exposure, focus box hidden, brightness reset.
+     */
+    private fun releaseTapMetering(force: Boolean = false) {
+        if (!force && sceneListener == null) return
         stopSceneWatch()
-        if (lapse.isRecording) return
-        camera?.cameraControl?.cancelFocusAndMetering()
+        tapTimeout?.cancel()
+        tapTimeout = null
+        if (ui.value.focusRing == null && ui.value.ev == 0) return
+        if (!lapse.isRecording) camera?.cameraControl?.cancelFocusAndMetering()
         if (ui.value.mode != Mode.PRO && ui.value.ev != 0) setQuickEv(0)
         ui.update { it.copy(focusRing = null) }
     }
