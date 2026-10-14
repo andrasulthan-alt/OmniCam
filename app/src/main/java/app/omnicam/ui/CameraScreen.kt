@@ -574,5 +574,5 @@ private fun openUri(ctx: Context, uri: Uri) {
 
 private fun formatTime(ms: Long): String {
     val s = ms / 1000
-    return "%02d:%02d".format(s / 60, s % 60)
+    return "%02d:%02d".format(java.util.Locale.US, s / 60, s % 60)
 }

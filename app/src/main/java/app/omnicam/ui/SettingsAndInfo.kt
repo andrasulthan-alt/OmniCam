@@ -4,6 +4,8 @@
 package app.omnicam.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -119,7 +121,7 @@ fun InfoScreen(onBack: () -> Unit) {
     var reports by remember { mutableStateOf<List<CameraReport>?>(null) }
     LaunchedEffect(Unit) { reports = withContext(Dispatchers.IO) { CameraInspector.inspect(ctx) } }
 
-    Column(Modifier.fillMaxSize().background(Color(0xFF0B0F14)).statusBarsPadding().navigationBarsPadding()) {
+    Column(Modifier.fillMaxSize().background(Color(0xFF0B0F14)).pointerInput(Unit) { detectTapGestures { } }.statusBarsPadding().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Chip("← Back", onClick = onBack)
             Text("Camera info", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp))
