@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -92,11 +93,14 @@ class MainActivity : ComponentActivity() {
                             PackageManager.PERMISSION_GRANTED
                     )
                 }
+                var askedOnce by rememberSaveable { mutableStateOf(false) }
                 val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
                     granted = ok
+                    val wasAsked = askedOnce
+                    askedOnce = true
                     // Denied for good ("don't ask again"): the system shows no dialog any more, so open the
                     // app's settings page where camera access can be turned on.
-                    if (!ok && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+                    if (!ok && wasAsked && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
                         runCatching {
                             startActivity(
                                 Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
