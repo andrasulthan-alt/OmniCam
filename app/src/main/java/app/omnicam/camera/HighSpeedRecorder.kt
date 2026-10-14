@@ -386,9 +386,9 @@ class HighSpeedRecorder(private val ctx: Context) {
     }
 
     /** Releases the camera. Use [whenClosed] to know when CameraX may open it again. */
-    @Synchronized fun close() {
+    @Synchronized fun close(): Uri? {
         generation++   // callbacks of the previous open request are now ignored
-        if (isRecording) runCatching { finishTake() }
+        val saved = if (isRecording) runCatching { finishTake() }.getOrNull() else null
         runCatching { session?.close() }
         session = null
         val d = device
@@ -400,5 +400,6 @@ class HighSpeedRecorder(private val ctx: Context) {
         // The device's onClosed() quits its thread and lowers openCount. A device still opening is
         // closed in onOpened() because its generation is now stale.
         if (d != null) runCatching { d.close() }
+        return saved
     }
 }

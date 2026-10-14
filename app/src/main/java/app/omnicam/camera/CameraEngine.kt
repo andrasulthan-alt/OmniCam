@@ -249,7 +249,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
             rebind()
             scope.launch {
-                prefs.settings.map { it.fullResolution to it.qualityFirst }.distinctUntilChanged().drop(1).collect { rebind() }
+                prefs.settings.map { it.fullResolution to it.qualityFirst }.distinctUntilChanged().drop(1).collect {
+                    // Photo-only settings: never cut a slow-motion or video take; other modes pick them up on their next bind
+                    if (ui.value.mode == Mode.PHOTO || ui.value.mode == Mode.PRO) rebind()
+                }
             }
         }, mainExec)
     }
@@ -704,7 +707,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
     }
 
+    private var hsEpoch = 0   // bumped on every close; callbacks of an older take are ignored
+
     private fun closeHighSpeed() {
+        hsEpoch++
         hsWatchdog?.cancel()
         hsWatchdog = null
         hsTicker?.cancel()
@@ -712,7 +718,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         if (hs.isRecording || (hs.isActive && ui.value.busy)) {
             ui.update { it.copy(recording = false, busy = false, recordedMs = 0) }
         }
-        hs.close()   // finalizes a running take
+        hs.close()?.let { uri -> ui.update { it.copy(lastUri = uri) } }   // finalizes a running take; show it
 
     }
 
@@ -723,8 +729,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             hsTicker = null
             if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
             ui.update { it.copy(busy = true) }
+            val epoch = hsEpoch
             hs.stopRecording { uri ->
                 ui.update { it.copy(recording = false, busy = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
+                if (epoch != hsEpoch) return@stopRecording   // close() already finalized this take
                 val camId = hsCaps?.cameraId
                 if (uri == null && hs.framesSeen > 0 && !hs.compatRecorder && camId != null) {
                     // Frames arrive but the encoder rejected the retimed file: switch to the settings of
@@ -740,8 +748,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
         if (ui.value.busy) return
         ui.update { it.copy(busy = true) }
+        val epoch = hsEpoch
         hs.startRecording { err ->
             ui.update { it.copy(busy = false) }
+            if (epoch != hsEpoch) return@startRecording   // slow motion was closed meanwhile
             if (err != null) {
                 onHighSpeedStartFailed(err)
                 return@startRecording
@@ -1013,6 +1023,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun selectLens(id: String) {
         if (recording != null || hs.isRecording || lapse.isRecording) return
+        releaseTapMetering(force = true)
         ui.update { it.copy(lensId = id, front = it.lenses.firstOrNull { l -> l.id == id }?.front ?: it.front) }
         rebind()
     }
@@ -1175,7 +1186,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
      */
     private fun lockForTimelapse(lock: Boolean) {
         val cam = camera ?: return
-        if (lock) stopSceneWatch()
+        if (lock) releaseTapMetering(force = true)   // also cancels the tap timeout: no brightness jump mid-clip
         runCatching {
             if (lock) {
                 val centre = androidx.camera.core.SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
