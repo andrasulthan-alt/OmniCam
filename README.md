@@ -66,22 +66,13 @@ and digits (about 50 KB). OmniCam is not affiliated with Nothing Technology.
 - Not yet done: independent security audit, reproducible builds, broad device testing. OmniCam does not claim to be as
   hardened as GrapheneOS Camera.
 
-## Tested devices
-| Device | Android | Result |
-|---|---|---|
-| Samsung Galaxy S9+ (Exynos 9810), Pixel Experience 13 (custom ROM) | 13 | Photo and video work; 4K records a steady 30 fps (viewfinder tears while recording 4K, see known issues). |
-| Samsung Galaxy S20 Ultra (SM-G988B), PixelOS custom ROM (earlier: stock One UI 13) | 16 | On One UI: blurry viewfinder (fixed in 0.3.3), vendor modes froze (removed in 0.4.3), slow motion unreliable. Now on PixelOS: 0.4.5 under test. |
-| Huawei P50 Pro, HarmonyOS (Android 12 base) | 12 | 0.3.9: black viewfinder after SLO-MO and cut-off QR tab fixed (confirmed). SLO-MO itself froze and recordings failed; 0.3.10 follows Google's official preview-only / recording-session flow, retries at a lower frame rate or with a compatibility recorder, and otherwise hides SLO-MO on that phone. |
-
-Tested it on another device? Open an issue with the output of **Copy report**.
-
 ## Known issues
 - **Fixed in 0.3.3:** the viewfinder previously rendered through `TextureView` (`ImplementationMode.COMPATIBLE`),
   which is documented by Android to add an extra blending pass and can look softer than the default `SurfaceView`
   (`PERFORMANCE`) mode — reported as a blurry/pixelated live preview on a Galaxy S20 Ultra. OmniCam now defaults to
   `PERFORMANCE` and only switches to `COMPATIBLE` for the brief moments the preview is resized into the small corner
   thumbnail (front-camera white-light video mode). Not yet confirmed fixed on the reporter's device.
-- **4K viewfinder on some custom ROMs (e.g. Galaxy S9+ / Pixel Experience 13):** the camera driver tears the viewfinder
+- **4K viewfinder on some custom ROMs:** the camera driver tears the viewfinder
   while recording 4K; the saved video is clean and a steady 30 fps. Native Camera shows the same. Routing the viewfinder
   through the recording stream (CameraX stream sharing, tried in 0.3.6 and with a minimal custom GL copy) removes the
   tearing but drops 4K video to about 24 fps on this phone, because every 4K frame then has to pass through the GPU and be
