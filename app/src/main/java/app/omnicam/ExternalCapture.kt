@@ -4,6 +4,7 @@
 package app.omnicam
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -30,7 +31,31 @@ class ExternalRequest(val video: Boolean, val output: Uri?) {
             }
             val out = IntentCompat.getParcelableExtra(intent, MediaStore.EXTRA_OUTPUT, Uri::class.java)
                 ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-            return ExternalRequest(video, out)
+            // Hanya content:// milik app pemanggil. file:// bisa menunjuk ke data pribadi OmniCam sendiri.
+            return ExternalRequest(video, out?.takeIf { it.scheme == ContentResolver.SCHEME_CONTENT })
+        }
+
+        /**
+         * Whether OmniCam may write the result to [uri] for another app. Never to OmniCam's own photos
+         * or videos or its own providers, and refuse when that cannot be checked. Rules follow
+         * GrapheneOS Camera's ForeignOutputUri (MIT).
+         */
+        fun outputAllowed(ctx: Context, uri: Uri): Boolean {
+            if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
+            val auth = uri.authority ?: return false
+            if (uri.userInfo != null || uri.port != -1) return false   // "0@media" also reaches MediaStore
+            val owner = runCatching { ctx.packageManager.resolveContentProvider(auth, 0)?.packageName }.getOrNull()
+            if (owner == ctx.packageName) return false
+            if (auth != MediaStore.AUTHORITY) return true
+            // The caller's own entry is often still pending (hidden): include pending and trashed rows
+            val args = android.os.Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+            }
+            return runCatching {
+                ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.OWNER_PACKAGE_NAME), args, null)
+                    ?.use { c -> c.moveToFirst() && c.getString(0) != ctx.packageName } ?: false
+            }.getOrDefault(false)
         }
     }
 }
@@ -42,9 +67,12 @@ object ExternalCapture {
         val result = Intent()
         val target = r.output
         if (target != null) {
+            if (!ExternalRequest.outputAllowed(ctx, target)) return Activity.RESULT_CANCELED to result
             return try {
                 cr.openInputStream(saved)!!.use { input ->
-                    cr.openOutputStream(target, "wt")!!.use { out -> input.copyTo(out) }
+                    val out = runCatching { cr.openOutputStream(target, "wt") }.getOrNull()
+                        ?: cr.openOutputStream(target, "w")
+                    out!!.use { input.copyTo(it) }
                 }
                 runCatching { cr.delete(saved, null, null) }
                 result.data = target

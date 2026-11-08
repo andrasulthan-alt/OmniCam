@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -56,8 +57,9 @@ class MainActivity : ComponentActivity() {
         val r = ExternalRequest.from(i)
         request = r
         baselineUri = vm.engine.ui.value.lastUri
+        if (r == null) vm.engine.setExternal(false)
         when {
-            r != null -> vm.engine.setMode(if (r.video) Mode.VIDEO else Mode.PHOTO)
+            r != null -> vm.engine.prepareExternal(if (r.video) Mode.VIDEO else Mode.PHOTO)
             i?.action == "android.media.action.VIDEO_CAMERA" -> vm.engine.setMode(Mode.VIDEO)
             i?.action == "android.media.action.STILL_IMAGE_CAMERA" -> vm.engine.setMode(Mode.PHOTO)
         }
@@ -71,7 +73,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Always light system-bar icons: the camera UI is black in both system light and dark mode
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         handleIntent(intent)
         setContent {
             OmniTheme {
@@ -93,20 +99,9 @@ class MainActivity : ComponentActivity() {
                             PackageManager.PERMISSION_GRANTED
                     )
                 }
-                var askedOnce by rememberSaveable { mutableStateOf(false) }
                 val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
                     granted = ok
-                    val wasAsked = askedOnce
-                    askedOnce = true
-                    // Denied for good ("don't ask again"): the system shows no dialog any more, so open the
-                    // app's settings page where camera access can be turned on.
-                    if (!ok && wasAsked && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
-                        runCatching {
-                            startActivity(
-                                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
-                            )
-                        }
-                    }
+                    recordPermissionResult(Manifest.permission.CAMERA, ok)
                 }
                 // Coming back from system settings with camera access granted: show the camera right away
                 LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
@@ -114,7 +109,12 @@ class MainActivity : ComponentActivity() {
                         PackageManager.PERMISSION_GRANTED
                 }
                 if (granted) {
-                    CameraScreen(vm.engine, vm.prefs)
+                    val req = request
+                    CameraScreen(
+                        vm.engine, vm.prefs,
+                        lockedMode = req?.let { if (it.video) Mode.VIDEO else Mode.PHOTO },
+                        onInfoShown = { infoShown = it },
+                    )
                 } else {
                     Column(
                         Modifier.fillMaxSize().background(Color(0xFF0B0F14)).padding(32.dp),
@@ -125,20 +125,37 @@ class MainActivity : ComponentActivity() {
                             color = Color.White, fontSize = 16.sp, textAlign = TextAlign.Center)
                         Text("Microphone and location are only requested when you turn on the related feature.",
                             color = Color.Gray, fontSize = 12.sp, textAlign = TextAlign.Center)
-                        Chip("Allow camera") { launcher.launch(Manifest.permission.CAMERA) }
+                        // Denied for good ("don't ask again"): Android shows no dialog any more, so this
+                        // opens OmniCam's settings page where camera access can be turned on.
+                        Chip("Allow camera") {
+                            requestOrOpenSettings(Manifest.permission.CAMERA) { launcher.launch(Manifest.permission.CAMERA) }
+                        }
                     }
                 }
             }
         }
     }
 
+    /** Camera info screen open: volume keys must not take pictures behind it. */
+    private var infoShown = false
+
+    private fun isVolumeKey(keyCode: Int) =
+        keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP
+
+    /** Volume keys act as shutter only where there is something to shoot (not in QR mode or on the info screen). */
+    private fun volumeShutter() =
+        vm.prefs.settings.value.volumeShutter && !infoShown && vm.engine.ui.value.mode != Mode.QR &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if ((keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) &&
-            vm.prefs.settings.value.volumeShutter
-        ) {
+        if (isVolumeKey(keyCode) && volumeShutter()) {
             if (event?.repeatCount == 0) vm.engine.onShutter()
             return true
         }
         return super.onKeyDown(keyCode, event)
     }
+
+    // Consume the matching key-up too, otherwise some ROMs still change the volume or show the panel
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean =
+        if (isVolumeKey(keyCode) && volumeShutter()) true else super.onKeyUp(keyCode, event)
 }
