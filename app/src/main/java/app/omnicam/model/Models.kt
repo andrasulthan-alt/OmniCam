@@ -204,6 +204,8 @@ data class CamUi(
     val recordedMs: Long = 0L,
 
     val lastUri: Uri? = null,
+    /** Newest photo or video OmniCam saved before this session, shown in the thumbnail until the first shot. */
+    val thumbUri: Uri? = null,
     val qr: QrHit? = null,
     val focusRing: FocusRing? = null,
     val message: String? = null,
