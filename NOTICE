@@ -9,7 +9,13 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE
 file for details.
 
-The code is original. Features were inspired by (not copied from): GrapheneOS Camera (MIT),
+Adapted code:
+- ExternalCapture.kt, `outputAllowed()`: the checks for a caller's output URI follow GrapheneOS Camera's
+  ForeignOutputUri (https://github.com/GrapheneOS/Camera, Copyright © 2021-2025 GrapheneOS, MIT License).
+- HighSpeedRecorder.kt: the slow-motion session flow and recorder settings follow Google's Camera2 slow-motion
+  sample (https://github.com/android/camera-samples, Copyright The Android Open Source Project, Apache-2.0).
+
+Other code is original. Features were inspired by (not copied from): GrapheneOS Camera (MIT),
 Open Camera, Fossify Camera, FreeDcam, MA Camera, Libre Camera, CameraX Info, and the concepts
 behind MotionCam and Native Camera. If code from another project is ever copied in, add attribution
 and make sure its license is compatible with GPLv3 (note: FreeDcam is GPLv2-only and cannot be
