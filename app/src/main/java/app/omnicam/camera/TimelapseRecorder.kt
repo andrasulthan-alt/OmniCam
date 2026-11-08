@@ -65,7 +65,7 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
     private var allKeyFrames = true
     private var frameLimit = MAX_FRAMES
     private var frameIndex = 0L
-    private var failed: String? = null
+    @Volatile private var failed: String? = null
     private var configBytes: ByteArray? = null   // SPS/PPS, for encoders that never report an output format
     private var encW = 0
     private var encH = 0
@@ -114,6 +114,9 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
         pathX = 0f; pathY = 0f; smoothX = 0f; smoothY = 0f
         lumaHistory.clear()
     }
+
+    /** True once the encoder failed while recording; the engine then stops and saves what was captured. */
+    val hasFailed: Boolean get() = isRecording && failed != null
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -402,13 +405,19 @@ class TimelapseRecorder(private val ctx: Context) : ImageAnalysis.Analyzer {
             var uri: Uri? = null
             var err = failed
             try {
-                codec?.let { c ->
+                // After an encoder failure the codec is unusable; the frames encoded so far are still saved
+                if (err == null) codec?.let { c ->
                     val idx = c.dequeueInputBuffer(500_000)
                     if (idx >= 0) c.queueInputBuffer(idx, 0, 0, frameIndex * 1_000_000L / OUTPUT_FPS, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                     drain(c, endOfStream = true)
                 }
-                if (err == null) uri = writeMp4()
-                if (uri == null && err == null) err = if (kept.isEmpty()) "Recording too short" else "Could not save the time-lapse"
+            } catch (e: Exception) {
+                err = err ?: (e.message ?: "encoder error")
+            }
+            try {
+                if (kept.isNotEmpty()) uri = runCatching { writeMp4() }.getOrNull()
+                if (uri != null) err = null
+                else err = if (kept.isEmpty()) "Recording too short" else "Could not save the time-lapse"
             } catch (e: Exception) {
                 err = e.message ?: "Could not save the time-lapse"
             } finally {

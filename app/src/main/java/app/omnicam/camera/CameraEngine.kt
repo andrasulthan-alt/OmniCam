@@ -30,6 +30,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraFilter
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
@@ -148,6 +149,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private var cameraXReleasedAt = 0L
     private var hsOpenRetried = false
     private var hsStartRetried = false
+    private var hsTransientFails = 0
 
     // Automatic (iPhone-style) time-lapse
     private val lapse by lazy { TimelapseRecorder(app) }
@@ -166,12 +168,20 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun slowMoBrokenKey(cameraId: String) = "slowmo_broken_${cameraId}_v$appVersion"
     private fun slowMoCompatKey(cameraId: String) = "slowmo_compat_${cameraId}_v$appVersion"
 
-    private val sound by lazy {
+    private val soundLazy = lazy {
         MediaActionSound().also {
             it.load(MediaActionSound.SHUTTER_CLICK)
             it.load(MediaActionSound.START_VIDEO_RECORDING)
             it.load(MediaActionSound.STOP_VIDEO_RECORDING)
         }
+    }
+    private val sound by soundLazy
+    @Volatile private var released = false
+
+    /** Plays a camera sound; never after [release] (MediaActionSound then throws and crashes the app). */
+    private fun play(id: Int) {
+        if (released || !prefs.settings.value.shutterSound) return
+        runCatching { sound.play(id) }
     }
 
     private var started = false
@@ -187,15 +197,35 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private var zoomObserver: Observer<ZoomState>? = null
     private var rotation = Surface.ROTATION_0
     private var activeFormat = PhotoFormat.JPEG
+    private var lapseAnalysis: ImageAnalysis? = null
+    /** Use cases this engine bound. A second OmniCam window (a photo request from another app) can unbind them. */
+    private var boundCases: List<UseCase> = emptyList()
+    /** RAW / RAW+JPEG chosen in PRO; PHOTO cannot save RAW, so visiting PHOTO must not forget it. */
+    private var proFormat = PhotoFormat.JPEG
+    /** A settings change skipped while recording; applied once the recording has ended. */
+    private var rebindPending = false
+    private var rebindQueued = false
+    private var openQueued = false
+    /** The last settings that the camera accepted, restored when a new combination is rejected. */
+    private var lastGood: CamUi? = null
 
     private val scopeAnalyzer = ScopeAnalyzer { scopeFrame.value = it }
-    private var lastQrText: String? = null
-    private var lastQrTime = 0L
+    @Volatile private var lastQrText: String? = null
+    @Volatile private var lastQrTime = 0L
     private val qrAnalyzer = QrAnalyzer { text, fmt -> onQr(text, fmt) }
 
     private val orientation = object : OrientationEventListener(app) {
         override fun onOrientationChanged(o: Int) {
             if (o == OrientationEventListener.ORIENTATION_UNKNOWN) return
+            // Only switch once clearly past the diagonal (45° + 20°), so a slightly tilted phone does
+            // not flip photos between portrait and landscape (GrapheneOS keeps a dead zone too)
+            val curDeg = when (rotation) {
+                Surface.ROTATION_270 -> 90
+                Surface.ROTATION_180 -> 180
+                Surface.ROTATION_90 -> 270
+                else -> 0
+            }
+            if (kotlin.math.abs(((o - curDeg + 540) % 360) - 180) < 65) return
             val r = when (o) {
                 in 45..134 -> Surface.ROTATION_270
                 in 135..224 -> Surface.ROTATION_180
@@ -206,6 +236,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 rotation = r
                 imageCapture?.targetRotation = r
                 videoCapture?.targetRotation = r
+                // The recorder locks the rotation at its first frame, so only update it between clips
+                if (!lapse.isRecording) lapseAnalysis?.targetRotation = r
             }
         }
     }
@@ -244,10 +276,19 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 return@addListener
             }
             provider = p
+            if (released) return@addListener   // the screen was closed before the camera was ready
             // Vendor extensions (HDR/Night/Portrait) were removed in 0.4.3: on tested Samsung phones they froze
             // the camera even with the phone's own settings. PHOTO uses the phone's normal processing.
             ui.update { it.copy(ready = true, lenses = buildLenses(p)) }
             rebind()
+            loadLatestThumb()
+            runCatching { io.execute { runCatching { MediaOutput.deleteStalePending(app) } } }
+            watchThermal()
+            scope.launch {
+                prefs.settings.map { it.geotag }.distinctUntilChanged().collect { on ->
+                    if (on) startLocation() else { stopLocation(); freshLoc = null }
+                }
+            }
             scope.launch {
                 prefs.settings.map { it.fullResolution to it.qualityFirst }.distinctUntilChanged().drop(1).collect {
                     // Photo-only settings: never cut a slow-motion or video take; other modes pick them up on their next bind
@@ -257,14 +298,149 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }, mainExec)
     }
 
+    /** The thumbnail shows OmniCam's newest photo or video right away, not only after the first shot. */
+    private fun loadLatestThumb() = refreshThumb()
+
+    /**
+     * Reloads the newest saved item, e.g. after returning from the gallery where it may have been deleted
+     * (GrapheneOS reloads it on every resume). lastUri is left alone: it signals a new capture.
+     */
+    private fun refreshThumb() {
+        if (released) return
+        runCatching {
+            io.execute {
+                val uri = runCatching { MediaOutput.latestOwn(app) }.getOrNull()
+                // A newer capture shown in the thumbnail stays, unless it was deleted in the gallery meanwhile
+                val last = ui.value.lastUri
+                val lastGone = last != null && runCatching {
+                    app.contentResolver.query(last, arrayOf(android.provider.BaseColumns._ID), null, null, null)
+                        ?.use { c -> c.count == 0 } ?: true
+                }.getOrDefault(false)
+                ui.update { it.copy(thumbUri = uri, lastUri = if (lastGone && it.lastUri == last) null else it.lastUri) }
+            }
+        }
+    }
+
+    private var thermalListener: android.os.PowerManager.OnThermalStatusChangedListener? = null
+
+    /**
+     * A phone that is too hot shuts the camera down by itself. Stop recordings cleanly first so the
+     * file is saved (Aperture watches the thermal status the same way).
+     */
+    private fun watchThermal() {
+        val pm = app.getSystemService(android.os.PowerManager::class.java) ?: return
+        var last = -1   // the first call only reports the current status: warn only when it rises
+        val l = android.os.PowerManager.OnThermalStatusChangedListener { status ->
+            val rose = last >= 0 && status > last
+            last = status
+            if (released || !rose) return@OnThermalStatusChangedListener
+            if (status >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
+                val wasRecording = recording != null || lapse.isRecording || hs.isRecording
+                recording?.stop()
+                if (lapse.isRecording) stopTimelapse()
+                if (hs.isRecording && !ui.value.busy) toggleHighSpeedRecording()
+                if (wasRecording) toast("The phone is too hot. Recording stopped and saved.")
+            } else if (status == android.os.PowerManager.THERMAL_STATUS_MODERATE) {
+                toast("The phone is getting hot. Long 4K or slow-motion recordings may stop.")
+            }
+        }
+        runCatching { pm.addThermalStatusListener(mainExec, l); thermalListener = l }
+    }
+
+    /** True for a one-off request from another app: no location, single shot. */
+    var external = false
+        private set
+
+    @Volatile private var freshLoc: android.location.Location? = null
+    private var locListener: androidx.core.location.LocationListenerCompat? = null
+
+    /** Live location while the camera is on screen and geotagging is on (GrapheneOS and Aperture do the same). */
+    @android.annotation.SuppressLint("MissingPermission")
+    fun startLocation() {
+        if (!prefs.settings.value.geotag || locListener != null || external) return
+        val fine = ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(app, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!fine && !coarse) return
+        val lm = app.getSystemService(android.location.LocationManager::class.java) ?: return
+        val provider = when {
+            android.os.Build.VERSION.SDK_INT >= 31 && lm.hasProvider(android.location.LocationManager.FUSED_PROVIDER) ->
+                android.location.LocationManager.FUSED_PROVIDER
+            fine && lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) -> android.location.LocationManager.GPS_PROVIDER
+            else -> android.location.LocationManager.NETWORK_PROVIDER
+        }
+        val l = androidx.core.location.LocationListenerCompat { freshLoc = it }
+        runCatching {
+            androidx.core.location.LocationManagerCompat.requestLocationUpdates(
+                lm, provider,
+                androidx.core.location.LocationRequestCompat.Builder(5_000)
+                    .setQuality(androidx.core.location.LocationRequestCompat.QUALITY_BALANCED_POWER_ACCURACY).build(),
+                l, Looper.getMainLooper(),
+            )
+            locListener = l
+        }
+    }
+
+    fun stopLocation() {
+        val l = locListener ?: return
+        locListener = null
+        val lm = app.getSystemService(android.location.LocationManager::class.java) ?: return
+        runCatching { androidx.core.location.LocationManagerCompat.removeUpdates(lm, l) }
+    }
+
+    /** The newest known position, if it is less than 15 minutes old. */
+    private fun currentLocation(): android.location.Location? =
+        listOfNotNull(freshLoc, MediaOutput.lastLocation(app)).maxByOrNull { it.elapsedRealtimeNanos }
+            ?.takeIf { SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos < 15 * 60 * 1_000_000_000L }
+
+    /** Another app asked for one photo or one video: plain single shot, no timer or burst left over. */
+    fun prepareExternal(m: Mode) {
+        setExternal(true)
+        ui.update { it.copy(burst = 1, timer = 0) }
+        setMode(m)
+    }
+
+    fun setExternal(on: Boolean) {
+        if (external == on) return
+        external = on
+        if (on) stopLocation() else startLocation()
+    }
+
     fun attach(o: LifecycleOwner, v: PreviewView) {
         owner = o
         previewView = v
         orientation.enable()
         // A time-lapse must be finished properly when the app goes to the background
         lifecycleObserver?.let { runCatching { o.lifecycle.removeObserver(it) } }
+        boundCases = emptyList()   // bound to the previous screen, which is gone; the rebind below binds again
         lifecycleObserver = androidx.lifecycle.LifecycleEventObserver { _, e ->
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP && lapse.isRecording) stopTimelapse()
+            when (e) {
+                androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                    orientation.enable()
+                    startLocation()
+                    refreshThumb()
+                    // A photo/video request from another app runs a second OmniCam window that takes the
+                    // camera over; when it closes, our use cases are gone: bind again (GrapheneOS rebinds on resume)
+                    val p = provider
+                    val c2SlowMo = ui.value.mode == Mode.SLOWMO && ui.value.slowMo.camera2
+                    if (p != null && ui.value.ready && !c2SlowMo && boundCases.isNotEmpty() &&
+                        boundCases.none { runCatching { p.isBound(it) }.getOrDefault(true) }
+                    ) rebind()
+                    else if (ui.value.mode == Mode.QR && camera != null) startQrFocusLoop()
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    // The camera is closed in the background: finish recordings properly (instead of the
+                    // closing camera cutting them), drop a countdown or the rest of a burst, and stop the
+                    // sensors (tap hold, orientation, location) that only matter on screen
+                    recording?.stop()
+                    if (lapse.isRecording) stopTimelapse()
+                    if (ui.value.countdown > 0 || burstRunning) cancelCapture()
+                    releaseTapMetering(force = true)
+                    orientation.disable()
+                    stopLocation()
+                    qrFocusJob?.cancel()
+                }
+                else -> {}
+            }
         }.also { o.lifecycle.addObserver(it) }
         if (ui.value.ready) rebind()
     }
@@ -272,20 +448,34 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     fun detach() {
         orientation.disable()
         releaseTapMetering(force = true)
+        // The old screen is gone: never bind to its destroyed lifecycle or view
+        lifecycleObserver?.let { l -> runCatching { owner?.lifecycle?.removeObserver(l) } }
+        lifecycleObserver = null
+        owner = null
+        previewView = null
     }
 
     fun release() {
+        released = true
         orientation.disable()
         stopSceneWatch()
         recording?.stop()
         zoomObserver?.let { zoomLive?.removeObserver(it) }
-        if (hs.isActive) runCatching { hs.close() }
+        stateObserver?.let { stateLive?.removeObserver(it) }
+        // Through closeHighSpeed(): late callbacks of a take in progress are then ignored
+        if (hs.isActive) runCatching { closeHighSpeed() }
         scope.cancel()
         io.shutdown()
         analysisExec.shutdown()
         runCatching { lapse.release() }
-        runCatching { provider?.unbindAll() }
-        runCatching { sound.release() }
+        // Only our own use cases: another OmniCam window may be using the camera right now
+        runCatching { provider?.unbind(*boundCases.toTypedArray()) }
+        cameraReturn?.let { cb ->
+            runCatching { app.getSystemService(android.hardware.camera2.CameraManager::class.java).unregisterAvailabilityCallback(cb) }
+        }
+        thermalListener?.let { l -> runCatching { app.getSystemService(android.os.PowerManager::class.java).removeThermalStatusListener(l) } }
+        stopLocation()
+        if (soundLazy.isInitialized()) runCatching { sound.release() }
     }
 
     // ───────────────────────── enumerasi ─────────────────────────
@@ -311,6 +501,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         }
 
     private fun baseSelector(s: CamUi): CameraSelector {
+        // QR always uses the main rear camera unless flipped to the front (GrapheneOS does the same)
+        if (s.mode == Mode.QR && !s.front) return CameraSelector.DEFAULT_BACK_CAMERA
         val id = s.lensId
         return if (id != null) {
             CameraSelector.Builder()
@@ -326,13 +518,17 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     // ───────────────────────── binding ─────────────────────────
 
     fun rebind() {
-        if (recording != null || lapse.isRecording) return
+        if (recording != null || lapse.isRecording || hs.isRecording) { rebindPending = true; return }
+        // A photo being saved would be lost by rebinding now: rebind as soon as it is saved
+        if (captureJob?.isActive == true && ui.value.countdown == 0) { rebindPending = true; return }
+        rebindPending = false
         // Leaving (or re-configuring) Camera2 slow motion: CameraX may only open the camera once
         // OmniCam's own high-speed session has fully released it. Opening earlier leaves some phones
         // (e.g. Huawei) with a black viewfinder.
         if (hs.isActive) {
             closeHighSpeed()
-            hs.whenClosed { rebind() }
+            // Several quick changes must open the camera once, not once per change
+            if (!rebindQueued) { rebindQueued = true; hs.whenClosed { rebindQueued = false; rebind() } }
             return
         }
         val p = provider ?: return
@@ -340,15 +536,34 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val v = previewView ?: return
         if (tryBind(p, o, v, withAnalysis = true) || tryBind(p, o, v, withAnalysis = false)) return
         // Some devices reject stabilized configurations; retry once without stabilization.
-        if (ui.value.mode == Mode.VIDEO && ui.value.video.stab) {
+        if (ui.value.mode == Mode.VIDEO && ui.value.video.stab && ui.value.video.stabOk) {
             ui.update { it.copy(video = it.video.copy(stab = false)) }
-            if (tryBind(p, o, v, withAnalysis = false)) toast("Stabilization is not supported with these settings")
-            else ui.update { it.copy(video = it.video.copy(stab = true)) }   // stabilization was not the cause
+            if (tryBind(p, o, v, withAnalysis = false)) { toast("Stabilization is not supported with these settings"); return }
+            ui.update { it.copy(video = it.video.copy(stab = true)) }   // stabilization was not the cause
+        }
+        // The camera rejected this combination (e.g. HDR with 60 fps): go back to the last settings that
+        // worked instead of leaving a black viewfinder with the rejected option still selected.
+        val good = lastGood ?: return
+        val cur = ui.value
+        // The mic switch does not rebind, so the saved settings may hold an old mic value: keep the current one
+        val goodVideo = good.video.copy(mic = cur.video.mic)
+        if (good.mode == cur.mode && good.front == cur.front && good.lensId == cur.lensId &&
+            (goodVideo != cur.video || good.format != cur.format || good.slowMo != cur.slowMo)
+        ) {
+            if (cur.mode == Mode.PRO) proFormat = good.format
+            ui.update { it.copy(video = good.video.copy(mic = it.video.mic), format = good.format, slowMo = good.slowMo) }
+            if (tryBind(p, o, v, withAnalysis = true) || tryBind(p, o, v, withAnalysis = false)) {
+                toast("Not supported on this camera with these settings")
+            }
         }
     }
 
+    /** Applies a settings change that had to wait for the end of a recording. */
+    private fun rebindIfPending() { if (rebindPending) rebind() }
+
     private fun tryBind(p: ProcessCameraProvider, o: LifecycleOwner, v: PreviewView, withAnalysis: Boolean): Boolean {
         val s = ui.value
+        var unbound = false
         try {
             val base = baseSelector(s)
             val selector = base
@@ -387,19 +602,30 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             val previewStabOk = s.mode == Mode.VIDEO &&
                 runCatching { Preview.getPreviewCapabilities(info).isStabilizationSupported }.getOrDefault(false)
             val videoStabOk = videoCaps?.isStabilizationSupported == true
-            val usePreviewStab = s.video.stab && previewStabOk
-            val useVideoStab = s.video.stab && !previewStabOk && videoStabOk
+            // Stabilization is outside the guaranteed stream combinations at 4K (GrapheneOS CamConfig):
+            // requesting it there kills the preview or silently lowers the quality. Same for 60 fps.
+            val q0 = videoCaps?.let { c ->
+                val hdr0 = s.video.hdr && DynamicRange.HLG_10_BIT in c.supportedDynamicRanges
+                val qs = c.getSupportedQualities(if (hdr0) DynamicRange.HLG_10_BIT else DynamicRange.SDR)
+                s.video.quality?.takeIf { it in qs } ?: qs.firstOrNull()
+            }
+            val fps0 = if (s.video.fps == 60 && info.supportedFrameRateRanges.any { it.upper >= 60 }) 60 else 30
+            val stabSafe = s.mode == Mode.VIDEO && q0 != Quality.UHD && fps0 != 60
+            val usePreviewStab = s.video.stab && previewStabOk && stabSafe
+            val useVideoStab = s.video.stab && !previewStabOk && videoStabOk && stabSafe
 
             val previewBuilder = Preview.Builder()
                 .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
             Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(captureCb)
             if (usePreviewStab) previewBuilder.setPreviewStabilizationEnabled(true)
+            else if (s.mode != Mode.VIDEO) previewBuilder.setPreviewStabilizationEnabled(false)   // full photo field of view
 
             val preview = previewBuilder.build().also { it.setSurfaceProvider(v.surfaceProvider) }
 
             val cases = mutableListOf<UseCase>(preview)
             imageCapture = null
             videoCapture = null
+            lapseAnalysis = null
             var newFormats = ui.value.formats
             var newFormat = s.format
             var newVideo = s.video
@@ -411,7 +637,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         f.outputFormat in supported && (s.mode == Mode.PRO || !f.hasRaw)
                     }.ifEmpty { listOf(PhotoFormat.JPEG) }
                     newFormats = allowed
-                    newFormat = if (s.format in allowed) s.format else PhotoFormat.JPEG
+                    val want = if (s.mode == Mode.PRO) proFormat else s.format
+                    newFormat = if (want in allowed) want else PhotoFormat.JPEG
                     activeFormat = newFormat
 
                     // Stock camera apps save ~12 MP by default even on 48/50/108 MP sensors: those sensors
@@ -472,7 +699,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     cases += vc
                     newVideo = s.video.copy(
                         qualities = qualities, quality = q, fps = fps, fps60Ok = fps60,
-                        hdrOk = hdrOk, hdr = s.video.hdr && hdrOk, stabOk = previewStabOk || videoStabOk,
+                        hdrOk = hdrOk, hdr = s.video.hdr && hdrOk, stabOk = (previewStabOk || videoStabOk) && stabSafe,
                     )
                 }
 
@@ -481,6 +708,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 Mode.TIMELAPSE -> {
                     // Time-lapse samples frames from a 16:9 YUV stream (up to 1080p); see TimelapseRecorder
                     cases += ImageAnalysis.Builder()
+                        .setTargetRotation(rotation)   // landscape time-lapses must be saved upright
                         .setResolutionSelector(
                             ResolutionSelector.Builder()
                                 .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
@@ -492,11 +720,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                         .build()
-                        .also { it.setAnalyzer(lapse.executor, lapse) }
+                        .also { lapseAnalysis = it; it.setAnalyzer(lapse.executor, lapse) }
                 }
             }
 
             p.unbindAll()
+            unbound = true
             // 4K video: let Preview and VideoCapture share ONE camera stream (via a pass-through
             // effect targeting both). The viewfinder then shows the same clean frames that go to the
             // encoder, instead of a second full-size stream that some camera drivers (e.g. custom ROMs)
@@ -518,8 +747,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 p.bindToLifecycle(o, selector, *cases.toTypedArray())
             }
             camera = cam
+            boundCases = cases.toList()
 
             observeZoom(cam)
+            observeCameraState(cam)
             val ranges = readRanges(cam)
             ui.update {
                 it.copy(
@@ -533,22 +764,140 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             scopeAnalyzer.histogram = s.scope.histogram
             scopeAnalyzer.zebra = s.scope.zebra
             scopeAnalyzer.peaking = s.scope.peaking
+            scopeAnalyzer.mirror = cam.cameraInfo.lensFacing == CameraSelector.LENS_FACING_FRONT
+            lastGood = ui.value
             // Senter menyala terus hanya di VIDEO/QR; di FOTO/PRO memakai flash mode
             // enableTorch on a camera with no flash unit (e.g. most front cameras) fails silently; guard it.
             if (cam.cameraInfo.hasFlashUnit()) {
                 cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
             }
             applyManual()
+            qrAnalyzer.paused = ui.value.qr != null
+            if (s.mode == Mode.QR) startQrFocusLoop() else qrFocusJob?.cancel()
             return true
         } catch (e: IllegalArgumentException) {
+            if (unbound) dropHandles()
             if (withAnalysis && s.mode == Mode.PRO) {
                 toast("This format + overlay combination is not supported; histogram/zebra turned off.")
             } else toast("Camera configuration not supported: ${e.message}")
             return false
         } catch (e: Exception) {
+            if (unbound) dropHandles()
             toast("Failed to open camera: ${e.message}")
             return true // jangan coba ulang
         }
+    }
+
+    /** Nothing is bound after a failed bind: never record or zoom through the previous camera's objects. */
+    private fun dropHandles() {
+        boundCases = emptyList()
+        camera = null
+        imageCapture = null
+        videoCapture = null
+        lapseAnalysis = null
+    }
+
+    private var stateLive: LiveData<CameraState>? = null
+    private var stateObserver: Observer<CameraState>? = null
+
+    /**
+     * CameraX turns the torch off and resets exposure compensation whenever the camera closes (app in
+     * the background, screen off). Reapply them each time the camera opens again, so what the controls
+     * show is what the camera does.
+     */
+    private fun observeCameraState(cam: Camera) {
+        stateObserver?.let { stateLive?.removeObserver(it) }
+        // Only a real reopen counts (the observer also gets the current state right away)
+        var wasOpen = cam.cameraInfo.cameraState.value?.type == CameraState.Type.OPEN
+        val obs = Observer<CameraState> { st ->
+            val open = st.type == CameraState.Type.OPEN
+            if (open && wasOpen.not() && camera === cam) {
+                val s = ui.value
+                if (lapse.isRecording) lockForTimelapse(true) else applyManual()
+                if (cam.cameraInfo.hasFlashUnit()) {
+                    cam.cameraControl.enableTorch(s.torch && (s.mode.isVideo || s.mode == Mode.QR))
+                }
+            }
+            wasOpen = open
+            val err = st.error
+            if (err == null) {
+                if (st.type == CameraState.Type.OPEN) { streamFallbacks = 0; lostRetries = 0; lastErrorCode = null }
+            } else if (camera === cam && err.code != lastErrorCode &&
+                // A camera error while OmniCam is in the background comes from another OmniCam window
+                owner?.lifecycle?.currentState?.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) == true
+            ) { lastErrorCode = err.code; onCameraStateError(cam, err) }
+        }
+        stateObserver = obs
+        stateLive = cam.cameraInfo.cameraState.also { it.observeForever(obs) }
+    }
+
+    private var lastErrorCode: Int? = null
+    private var cameraReturn: android.hardware.camera2.CameraManager.AvailabilityCallback? = null
+
+    /** Tells the user why the viewfinder is black instead of failing silently (as Aperture and GrapheneOS do). */
+    private fun onCameraStateError(cam: Camera, err: CameraState.StateError) {
+        when (err.code) {
+            CameraState.ERROR_CAMERA_IN_USE, CameraState.ERROR_MAX_CAMERAS_IN_USE ->
+                toast("Another app is using the camera. OmniCam reconnects when it is free.")
+            CameraState.ERROR_CAMERA_DISABLED -> toast("Camera access is turned off (privacy switch or device policy).")
+            CameraState.ERROR_DO_NOT_DISTURB_MODE_ENABLED -> toast("The camera is blocked while Do Not Disturb is on.")
+            CameraState.ERROR_STREAM_CONFIG -> onStreamConfigRejected()
+            CameraState.ERROR_CAMERA_FATAL_ERROR -> onCameraLost(cam)
+            else -> if (err.type == CameraState.ErrorType.CRITICAL) toast("Camera error ${err.code}. Reopening…")
+        }
+    }
+
+    /** The camera service restarted or the camera died: stop what is running and rebind once it is back. */
+    private var lostRetries = 0
+
+    private fun onCameraLost(cam: Camera) {
+        recording?.stop()
+        if (++lostRetries > 3) { toast("The camera keeps failing. Please restart the phone."); return }
+        if (lapse.isRecording) stopTimelapse()
+        if (captureJob?.isActive == true) cancelCapture()
+        toast("The camera stopped responding. Reconnecting…")
+        val id = runCatching { Camera2CameraInfo.from(cam.cameraInfo).cameraId }.getOrNull()
+        val cm = app.getSystemService(android.hardware.camera2.CameraManager::class.java) ?: return
+        cameraReturn?.let { runCatching { cm.unregisterAvailabilityCallback(it) } }
+        cameraReturn = object : android.hardware.camera2.CameraManager.AvailabilityCallback() {
+            override fun onCameraAvailable(cameraId: String) {
+                if (id != null && cameraId != id) return
+                runCatching { cm.unregisterAvailabilityCallback(this) }
+                cameraReturn = null
+                // A SurfaceView keeps its old surface on a same-size rebind; the restarted service can't use it
+                // (shown again one frame later, then bound, so the view really gets a new surface)
+                val sv = previewView?.let { v -> (0 until v.childCount).map { v.getChildAt(it) }.filterIsInstance<android.view.SurfaceView>() }
+                    .orEmpty()
+                if (sv.isEmpty()) { rebind(); return }
+                sv.forEach { it.visibility = android.view.View.INVISIBLE }
+                sv.first().post {
+                    sv.forEach { it.visibility = android.view.View.VISIBLE }
+                    rebind()
+                }
+            }
+        }.also { runCatching { cm.registerAvailabilityCallback(mainExec, it) } }
+    }
+
+    private var streamFallbacks = 0
+
+    /** The camera accepted the configuration at bind time but then rejected it: step video settings down. */
+    private fun onStreamConfigRejected() {
+        val s = ui.value
+        val v = s.video
+        val next = when {
+            streamFallbacks >= 4 || s.mode != Mode.VIDEO -> null
+            v.stab && v.stabOk -> v.copy(stab = false)
+            v.fps == 60 -> v.copy(fps = 30)
+            v.hdr -> v.copy(hdr = false)
+            v.quality != Quality.FHD && Quality.FHD in v.qualities -> v.copy(quality = Quality.FHD)
+            else -> null
+        }
+        streamFallbacks++
+        if (next != null) {
+            ui.update { it.copy(video = next) }
+            toast("Not supported on this camera with these settings; adjusted.")
+            rebind()
+        } else toast("The camera rejected these settings.")
     }
 
     private var effect: PassThroughEffect? = null
@@ -592,8 +941,10 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     /** Switches from CameraX to OmniCam's own Camera2 high-speed recorder. The UI then shows a SurfaceView. */
     private fun enterCamera2SlowMo(p: ProcessCameraProvider, caps: HighSpeedCaps) {
+        // Only wait for CameraX to let go of the camera if it actually had it (not when changing fps)
+        if (camera != null) cameraXReleasedAt = SystemClock.elapsedRealtime()
         p.unbindAll()
-        cameraXReleasedAt = SystemClock.elapsedRealtime()
+        boundCases = emptyList()
         hsOpenRetried = false
         hsStartRetried = false
         camera = null
@@ -622,6 +973,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     /** Called by the UI when the slow-motion SurfaceView (sized exactly to the stream) is ready or gone. */
     fun onSlowMoSurface(surface: android.view.Surface?, width: Int = 0, height: Int = 0) {
+        // A repeated surfaceChanged for the same surface must not queue a second open
+        if (surface != null && surface === hsSurface && hsSurfaceSize == Size(width, height) && hs.isActive) return
         hsSurface = surface
         hsSurfaceSize = if (surface != null) Size(width, height) else null
         if (surface == null) closeHighSpeed() else openHighSpeedIfReady()
@@ -635,12 +988,18 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         if (s.mode != Mode.SLOWMO || !s.slowMo.camera2) return
         // High-speed sessions require the preview surface to match the stream size exactly
         if (hsSurfaceSize != size) return
+        if (openQueued) return
+        openQueued = true
         hs.whenClosed {
+            openQueued = false
+            // Use the latest camera and size: they may have changed while the previous session closed
+            val c = hsCaps ?: return@whenClosed
+            val sz = ui.value.slowMo.size ?: return@whenClosed
             // CameraX closes the camera asynchronously after unbindAll(); opening it again right away
             // makes some drivers (Samsung) fail with "camera in use" or a device error. Wait briefly.
             val wait = HS_OPEN_GAP_MS - (SystemClock.elapsedRealtime() - cameraXReleasedAt)
-            if (wait > 0) scope.launch { delay(wait); openHighSpeedNow(caps, size) }
-            else openHighSpeedNow(caps, size)
+            if (wait > 0) scope.launch { delay(wait); openHighSpeedNow(c, sz) }
+            else openHighSpeedNow(c, sz)
         }
     }
 
@@ -650,18 +1009,33 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         val surf = hsSurface ?: return
         if (now.mode != Mode.SLOWMO || !now.slowMo.camera2 || now.slowMo.size != size || hsSurfaceSize != size) return
         hs.compatRecorder = quirks.getBoolean(slowMoCompatKey(caps.cameraId), false)
+        hs.onTakeInterrupted = { why ->
+            if (hs.isRecording) {
+                toast("Slow motion stopped: $why")
+                toggleHighSpeedRecording()
+            }
+        }
         hs.open(caps.cameraId, size, now.slowMo.fps, surf,
             onReady = {
                 hsOpenRetried = false
                 scope.launch { startHighSpeedWatchdog(caps.cameraId) }
             },
-            onError = { msg ->
+            onError = { msg, permanent ->
                 scope.launch {
                     if (!hsOpenRetried) {
                         // One quiet retry: the first open often races the camera being released
                         hsOpenRetried = true
                         closeHighSpeed()
                         hs.whenClosed { scope.launch { delay(HS_RETRY_DELAY_MS); openHighSpeedIfReady() } }
+                    } else if (!permanent && ++hsTransientFails < 2) {
+                        // Camera busy (another app, a call, the privacy switch): go to video for now,
+                        // but keep offering slow motion. Failing the same way again on the next visit
+                        // means this phone drops high-speed cameras (some Samsung firmwares): hide it then.
+                        hsOpenRetried = false
+                        closeHighSpeed()
+                        toast("Slow motion could not open the camera ($msg). Switched to video.")
+                        ui.update { it.copy(mode = Mode.VIDEO, slowMo = it.slowMo.copy(camera2 = false)) }
+                        hs.whenClosed { rebind() }
                     } else {
                         // Never leave the user on a black screen, and do not offer it again on this phone
                         slowMoUnsupported(caps.cameraId, msg)
@@ -695,6 +1069,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             delay(1500)
             val s = ui.value
             val progressed = hs.framesSeen - before
+            if (progressed >= 15) hsTransientFails = 0   // frames flow: earlier failures were temporary
             if (s.mode != Mode.SLOWMO || !s.slowMo.camera2 || !hs.isActive || hs.isRecording || s.busy || progressed >= 15) return@launch
             val lower = s.slowMo.rates.filter { it < s.slowMo.fps }.maxOrNull()
             if (lower != null) {
@@ -708,6 +1083,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     }
 
     private var hsEpoch = 0   // bumped on every close; callbacks of an older take are ignored
+    private var hsStartedAt = 0L
 
     private fun closeHighSpeed() {
         hsEpoch++
@@ -725,16 +1101,35 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun toggleHighSpeedRecording() {
         if (hs.isRecording) {
             if (ui.value.busy) return   // a stop is already in progress
+            // A quick tap-tap still gives a clip: record at least 1 s (8 s of slow motion at 240 fps),
+            // as in Google's earlier official sample
+            val minLeft = 1000 - (SystemClock.elapsedRealtime() - hsStartedAt)
+            if (minLeft > 0) {
+                ui.update { it.copy(busy = true) }
+                val ep = hsEpoch
+                val takeStart = hsStartedAt
+                scope.launch {
+                    delay(minLeft)
+                    if (ep != hsEpoch || takeStart != hsStartedAt) return@launch   // that take already ended
+                    ui.update { it.copy(busy = false) }
+                    if (hs.isRecording) toggleHighSpeedRecording()
+                }
+                return
+            }
             hsTicker?.cancel()
             hsTicker = null
-            if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+            play(MediaActionSound.STOP_VIDEO_RECORDING)
             ui.update { it.copy(busy = true) }
             val epoch = hsEpoch
+            // Only a take that really received camera frames says anything about the encoder
+            val realTake = hs.recordFrames >= 15
             hs.stopRecording { uri ->
                 ui.update { it.copy(recording = false, busy = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
                 if (epoch != hsEpoch) return@stopRecording   // close() already finalized this take
                 val camId = hsCaps?.cameraId
-                if (uri == null && hs.framesSeen > 0 && !hs.compatRecorder && camId != null) {
+                if (uri == null && !realTake) {
+                    toast("Slow motion recorded no frames from the camera. Please try again.")
+                } else if (uri == null && !hs.compatRecorder && camId != null) {
                     // Frames arrive but the encoder rejected the retimed file: switch to the settings of
                     // Google's official sample and let the user try again.
                     hs.compatRecorder = true
@@ -743,12 +1138,22 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 } else if (uri == null) {
                     toast("Slow-motion recording failed")
                 }
+                // Some drivers freeze when the preview restarts after a take: watch for that too
+                if (camId != null && hs.isActive) startHighSpeedWatchdog(camId)
+                rebindIfPending()
             }
             return
         }
         if (ui.value.busy) return
+        if (!hs.previewRunning) { toast("Slow motion is getting ready, try again in a moment"); return }
         ui.update { it.copy(busy = true) }
         val epoch = hsEpoch
+        hs.deviceRotationDegrees = when (rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
         hs.startRecording { err ->
             ui.update { it.copy(busy = false) }
             if (epoch != hsEpoch) return@startRecording   // slow motion was closed meanwhile
@@ -757,8 +1162,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 return@startRecording
             }
             hsStartRetried = false
-            if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+            play(MediaActionSound.START_VIDEO_RECORDING)
             val t0 = SystemClock.elapsedRealtime()
+            hsStartedAt = t0
             ui.update { it.copy(recording = true, paused = false, recordedMs = 0) }
             hsTicker = scope.launch {
                 while (true) {
@@ -776,7 +1182,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun onHighSpeedStartFailed(step: String) {
         val camId = hsCaps?.cameraId ?: return
         val s = ui.value
-        if (!hsStartRetried && !hs.compatRecorder) {
+        // Only an encoder that rejects the retimed file is helped by compatibility mode; a camera or
+        // session failure is not, and must not switch it on for good.
+        if (step == "storage") { toast("Could not create the video file. Is the storage full?"); return }
+        if (step == "camera") { toast("Slow motion could not start, please try again"); return }
+        // A rejected [viewfinder + recorder] session is helped by a lower frame rate, not by compatibility mode
+        if (step != "session" && !hsStartRetried && !hs.compatRecorder) {
             hsStartRetried = true
             hs.compatRecorder = true
             quirks.edit().putBoolean(slowMoCompatKey(camId), true).apply()
@@ -829,7 +1240,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         p.unbindAll()
         val cam = p.bindToLifecycle(o, selector, config)
         camera = cam
+        boundCases = listOf(preview, vc)
         observeZoom(cam)
+        observeCameraState(cam)
         ui.update {
             it.copy(
                 slowMo = SlowMoUi(qualities = qualities, quality = q, rates = rates, fps = fps),
@@ -944,7 +1357,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, m.awbMode)
         }
         c2.setCaptureRequestOptions(b.build())
-        cam.cameraControl.setExposureCompensationIndex(if (m.exposureManual) 0 else m.evIndex)
+        // With manual exposure (AE off) the flash cannot fire and only delays the shot
+        imageCapture?.flashMode = if (m.exposureManual && r.manualSensor) ImageCapture.FLASH_MODE_OFF else s.flash
+        // Each camera has its own range: an index from another lens would be rejected silently
+        val ev = if (r.evSupported) m.evIndex.coerceIn(r.evMin, r.evMax) else 0
+        if (ev != m.evIndex) ui.update { it.copy(manual = it.manual.copy(evIndex = ev)) }
+        cam.cameraControl.setExposureCompensationIndex(if (m.exposureManual) 0 else ev)
     }
 
     fun setExposureManual(on: Boolean) {
@@ -1008,7 +1426,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun setMode(m: Mode) {
         if (recording != null || hs.isRecording || lapse.isRecording || m == ui.value.mode) return
+        if (captureJob?.isActive == true) { if (ui.value.countdown > 0) cancelCapture() else return }
         releaseTapMetering(force = true)
+        qrAnalyzer.paused = false
         ui.update { it.copy(mode = m, torch = false, qr = null, manual = if (m == Mode.PRO) it.manual else it.manual.copy(exposureManual = false, focusManual = false, awbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO, evIndex = 0)) }
         scopeFrame.value = null
         rebind()
@@ -1016,19 +1436,30 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun flip() {
         if (recording != null || hs.isRecording || lapse.isRecording) return
+        if (captureJob?.isActive == true) { if (ui.value.countdown > 0) cancelCapture() else return }
         releaseTapMetering(force = true)
-        ui.update { it.copy(front = !it.front, lensId = null, ev = 0, focusRing = null) }
+        // The front-camera screen light must not turn into the rear LED torch
+        ui.update { it.copy(front = !it.front, lensId = null, ev = 0, focusRing = null, torch = false) }
         rebind()
     }
 
     fun selectLens(id: String) {
         if (recording != null || hs.isRecording || lapse.isRecording) return
+        if (captureJob?.isActive == true) { if (ui.value.countdown > 0) cancelCapture() else return }
         releaseTapMetering(force = true)
-        ui.update { it.copy(lensId = id, front = it.lenses.firstOrNull { l -> l.id == id }?.front ?: it.front) }
+        ui.update {
+            val front = it.lenses.firstOrNull { l -> l.id == id }?.front ?: it.front
+            it.copy(lensId = id, front = front, torch = if (front != it.front) false else it.torch)
+        }
         rebind()
     }
 
-    fun setFormat(f: PhotoFormat) { ui.update { it.copy(format = f) }; rebind() }
+    fun setFormat(f: PhotoFormat) {
+        if (captureJob?.isActive == true) return   // a photo is being saved with the current format
+        if (ui.value.mode == Mode.PRO) proFormat = f
+        ui.update { it.copy(format = f) }
+        rebind()
+    }
 
     fun setVideoQuality(q: Quality) { ui.update { it.copy(video = it.video.copy(quality = q)) }; rebind() }
     fun setVideoFps(fps: Int) { ui.update { it.copy(video = it.video.copy(fps = fps)) }; rebind() }
@@ -1145,13 +1576,40 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
 
     fun clearFocusRing() { ui.update { it.copy(focusRing = null) } }
     fun clearMessage() { ui.update { it.copy(message = null) } }
-    fun clearQr() { ui.update { it.copy(qr = null) }; lastQrText = null }
+    // The same code stays hidden while it is still in view; it shows again once it was away for 3 s
+    fun clearQr() {
+        ui.update { it.copy(qr = null) }
+        lastQrTime = SystemClock.elapsedRealtime()
+        qrAnalyzer.paused = false
+    }
+
+    private var qrFocusJob: Job? = null
+
+    /** Codes held close are often out of focus: refocus the centre every 2 s while scanning (GrapheneOS). */
+    private fun startQrFocusLoop() {
+        qrFocusJob?.cancel()
+        qrFocusJob = scope.launch {
+            while (true) {
+                delay(2000)
+                if (ui.value.mode != Mode.QR) break
+                if (ui.value.focusRing != null) continue   // the user tapped to focus: leave it
+                val cam = camera ?: continue
+                val pt = androidx.camera.core.SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f, 0.3f)
+                runCatching {
+                    cam.cameraControl.startFocusAndMetering(
+                        FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF).disableAutoCancel().build()
+                    )
+                }
+            }
+        }
+    }
     private fun toast(msg: String) { ui.update { it.copy(message = msg) } }
 
     private fun onQr(text: String, format: String) {
         val now = SystemClock.elapsedRealtime()
-        if (text == lastQrText && now - lastQrTime < 3000) return
+        if (text == lastQrText && now - lastQrTime < 3000) { lastQrTime = now; return }
         lastQrText = text
+        qrAnalyzer.paused = true   // no decoding under the result card
         lastQrTime = now
         ui.update { it.copy(qr = QrHit(text, format)) }
     }
@@ -1161,7 +1619,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun toggleTimelapse() {
         if (lapse.isRecording) { stopTimelapse(); return }
         if (ui.value.busy) return
-        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+        play(MediaActionSound.START_VIDEO_RECORDING)
         lapse.start()
         lockForTimelapse(true)
         val t0 = SystemClock.elapsedRealtime()
@@ -1171,6 +1629,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 ui.update {
                     it.copy(recordedMs = SystemClock.elapsedRealtime() - t0, lapseSpeed = lapse.speed, lapseFrames = lapse.keptFrames)
                 }
+                // The encoder failed: stop now and save what was captured, instead of "recording" nothing
+                if (lapse.hasFailed) { stopTimelapse(); break }
                 delay(500)
             }
         }
@@ -1207,11 +1667,12 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
         lockForTimelapse(false)
         lapseTicker?.cancel()
         lapseTicker = null
-        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+        play(MediaActionSound.STOP_VIDEO_RECORDING)
         ui.update { it.copy(busy = true) }
         lapse.stop { uri, err ->
             ui.update { it.copy(recording = false, busy = false, recordedMs = 0, lastUri = uri ?: it.lastUri) }
             if (uri != null) toast("Time-lapse saved") else if (err != null) toast("Time-lapse: $err")
+            rebindIfPending()
         }
     }
 
@@ -1227,9 +1688,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
     private fun capturePhoto() {
         imageCapture ?: return
         if (captureJob?.isActive == true) {
-            // Ketuk lagi saat hitung mundur = batal
-            captureJob?.cancel()
-            ui.update { it.copy(countdown = 0, busy = false) }
+            // Tap again during the countdown or a burst = stop. A second tap while a single photo is
+            // being saved is ignored: cancelling then would lose that photo.
+            if (ui.value.countdown > 0 || burstRunning) cancelCapture()
             return
         }
         captureJob = scope.launch {
@@ -1248,23 +1709,37 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                     screenFlashActive.value = true
                     delay(250) // let the screen reach full brightness and auto-exposure adjust
                 }
+                burstRunning = s0.burst > 1
                 repeat(s0.burst) {
                     // The camera may have been flipped or changed during the countdown: use the current capture
                     val ic = imageCapture ?: return@repeat
-                    if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
-                    takeOne(ic, activeFormat)
+                    play(MediaActionSound.SHUTTER_CLICK)
+                    // A save that never reports back must not lock the camera controls forever
+                    withTimeoutOrNull(15_000) { takeOne(ic, activeFormat) } ?: toast("Saving the photo took too long")
                 }
             } finally {
+                burstRunning = false
                 screenFlashActive.value = false
                 ui.update { it.copy(busy = false, countdown = 0) }
+                if (rebindPending) mainHandler.post { rebindIfPending() }
             }
         }
+    }
+
+    private var burstRunning = false
+
+    private fun cancelCapture() {
+        captureJob?.cancel()
+        burstRunning = false
+        screenFlashActive.value = false
+        ui.update { it.copy(countdown = 0, busy = false) }
     }
 
     private suspend fun takeOne(ic: ImageCapture, format: PhotoFormat) = suspendCancellableCoroutine<Unit> { cont ->
         val st = prefs.settings.value
         val stamp = MediaOutput.stamp()
-        val loc = if (st.geotag) MediaOutput.lastLocation(app) else null
+        // Never send a position to another app's one-off request, and never use an old fix
+        val loc = if (st.geotag && !external) currentLocation() else null
         val mirror = st.mirrorFront && ui.value.front
         var remaining = if (format == PhotoFormat.RAW_JPEG) 2 else 1
 
@@ -1274,7 +1749,8 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 if (uri != null) {
                     val mime = app.contentResolver.getType(uri).orEmpty()
                     if (st.stripMetadata && mime == "image/jpeg" && format != PhotoFormat.ULTRA_HDR) {
-                        MediaOutput.scrub(app, uri)
+                        // "Save location" was turned on on purpose: keep the GPS position, strip the rest
+                        MediaOutput.scrub(app, uri, keepGps = st.geotag && loc != null)
                     }
                     if (!mime.contains("dng") || format == PhotoFormat.RAW) {
                         ui.update { it.copy(lastUri = uri) }
@@ -1323,7 +1799,7 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             PackageManager.PERMISSION_GRANTED
         // High-speed sessions record without audio (a slowed-down soundtrack would be unusable)
         if (s.video.mic && micGranted && s.mode != Mode.SLOWMO) pending = pending.withAudioEnabled()
-        if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
+        play(MediaActionSound.START_VIDEO_RECORDING)
 
         recording = pending.start(mainExec) { ev ->
             when (ev) {
@@ -1334,8 +1810,9 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                 is VideoRecordEvent.Resume -> ui.update { it.copy(paused = false) }
                 is VideoRecordEvent.Finalize -> {
                     recording = null
-                    if (prefs.settings.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+                    play(MediaActionSound.STOP_VIDEO_RECORDING)
                     ui.update { it.copy(recording = false, paused = false, recordedMs = 0) }
+                    rebindIfPending()
                     if (ev.hasError()) {
                         val reason = when (ev.error) {
                             VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE -> "storage full"
@@ -1348,13 +1825,28 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
                         toast("Recording stopped: $reason (code ${ev.error})")
                         // These stops still leave a playable file (CameraX docs): keep it. Only other errors
                         // leave an empty or broken file, which is removed from the gallery.
+                        // An encoder failure near the end can still leave a playable clip: check before
+                        // deleting (GrapheneOS VideoCapturer). An empty file is never kept.
                         val out = ev.outputResults.outputUri.takeIf { it != android.net.Uri.EMPTY }
-                        val playable = ev.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
+                        val bytes = ev.recordingStats.numBytesRecorded
+                        val stopKeepsFile = ev.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
                             ev.error == VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE ||
                             ev.error == VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED ||
                             ev.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
-                        if (playable && out != null) ui.update { it.copy(lastUri = out) }
-                        else runCatching { out?.let { app.contentResolver.delete(it, null, null) } }
+                        val maybePlayable = ev.error == VideoRecordEvent.Finalize.ERROR_ENCODING_FAILED ||
+                            ev.error == VideoRecordEvent.Finalize.ERROR_RECORDER_ERROR ||
+                            ev.error == VideoRecordEvent.Finalize.ERROR_UNKNOWN
+                        when {
+                            out == null -> {}
+                            stopKeepsFile && bytes > 0 -> ui.update { it.copy(lastUri = out) }
+                            maybePlayable && bytes > 0 -> runCatching {
+                                io.execute {
+                                    if (isPlayable(out)) ui.update { it.copy(lastUri = out) }
+                                    else runCatching { app.contentResolver.delete(out, null, null) }
+                                }
+                            }
+                            else -> runCatching { app.contentResolver.delete(out, null, null) }
+                        }
                     }
                     else ui.update { it.copy(lastUri = ev.outputResults.outputUri) }
                 }
@@ -1362,6 +1854,16 @@ class CameraEngine(private val app: Application, private val prefs: Prefs) {
             }
         }
     }
+
+    private fun isPlayable(uri: android.net.Uri): Boolean = runCatching {
+        app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+            val r = android.media.MediaMetadataRetriever()
+            try {
+                r.setDataSource(pfd.fileDescriptor)
+                r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != null
+            } finally { runCatching { r.release() } }
+        } ?: false
+    }.getOrDefault(false)
 
     fun pauseResume() {
         val r = recording ?: return

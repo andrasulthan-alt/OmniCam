@@ -14,6 +14,7 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.CamcorderProfile
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
@@ -59,8 +60,15 @@ class HighSpeedRecorder(private val ctx: Context) {
     private var previewSurface: Surface? = null
     private var size: Size? = null
     private var fps = 0
-    private var orientationHint = 90
-    private var onErrorCb: (String) -> Unit = {}
+    private var cameraId: String? = null
+    /** Preview-only frame rate [30, fps] (Camera2 javadoc): framing does not need 240 frames per second. */
+    private var previewRange: Range<Int>? = null
+    private var sensorOrientation = 90
+    private var frontFacing = false
+    private var onErrorCb: (String, Boolean) -> Unit = { _, _ -> }
+
+    /** How the phone is held (0/90/180/270), set by the engine before each take: landscape takes play upright. */
+    @Volatile var deviceRotationDegrees = 0
 
     /** Cameras opened (or opening) and not yet fully closed. CameraX must wait until this is 0. */
     private val openCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -69,20 +77,34 @@ class HighSpeedRecorder(private val ctx: Context) {
     @Volatile var isRecording = false
         private set
 
+    /** The preview-only session is running: a take can start. False while opening and while a stop restarts the preview. */
+    @Volatile var previewRunning = false
+        private set
+
     /** Frames delivered by the current session; the engine uses it to detect a stalled driver. */
     @Volatile var framesSeen = 0L
         private set
 
+    /** Frames delivered while the current take was recording (0 = the recorder never got any). */
+    @Volatile var recordFrames = 0L
+        private set
+    @Volatile private var countingTake = false
+
     /**
-     * Compatibility recorder settings, exactly as in Google's official Camera2 slow-motion sample:
-     * the file is written at the capture rate (e.g. 240 fps) instead of being retimed to 30 fps.
+     * Last-resort recorder setting (the older official Camera2 sample): the file is written at the
+     * capture rate (e.g. 240 fps), so most players show it at normal speed. Only used when the normal
+     * slowed-down file fails on this phone.
      */
     @Volatile var compatRecorder = false
 
+    /** Called on the main thread when the recorder stops by itself during a take (encoder error, file size limit). */
+    var onTakeInterrupted: (String) -> Unit = {}
+
     private val frameCounter = object : CameraCaptureSession.CaptureCallback() {
-        override fun onCaptureCompleted(
-            session: CameraCaptureSession, request: CaptureRequest, result: android.hardware.camera2.TotalCaptureResult,
-        ) { framesSeen++ }
+        override fun onCaptureStarted(session: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+            framesSeen++
+            if (countingTake) recordFrames++
+        }
     }
 
     val isActive: Boolean get() = openCount.get() > 0
@@ -122,24 +144,34 @@ class HighSpeedRecorder(private val ctx: Context) {
         run.forEach { mainHandler.post(it) }
     }
 
-    private fun error(msg: String) { mainHandler.post { onErrorCb(msg) } }
+    /**
+     * [permanent] is true only when this camera itself rejects slow motion. A camera taken by another
+     * app, a call, or the privacy switch is temporary and must not hide slow motion for good.
+     */
+    private fun error(msg: String, permanent: Boolean = true) { mainHandler.post { onErrorCb(msg, permanent) } }
 
     /** Opens the camera and starts the high-speed preview on [preview] (a Surface sized exactly [size]). */
     @SuppressLint("MissingPermission")
     fun open(
         cameraId: String, size: Size, fps: Int, preview: Surface,
-        onReady: () -> Unit, onError: (String) -> Unit,
+        onReady: () -> Unit, onError: (String, Boolean) -> Unit,
     ) {
         close()
         framesSeen = 0
         val gen = ++generation
         this.size = size
         this.fps = fps
+        this.cameraId = cameraId
         onErrorCb = onError
         previewSurface = preview
-        orientationHint = runCatching {
-            cm.getCameraCharacteristics(cameraId).get(CameraCharacteristics.SENSOR_ORIENTATION)
-        }.getOrNull() ?: 90
+        val chars = runCatching { cm.getCameraCharacteristics(cameraId) }.getOrNull()
+        sensorOrientation = chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        frontFacing = chars?.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
+        previewRange = runCatching {
+            chars?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?.getHighSpeedVideoFpsRangesFor(size)
+                ?.firstOrNull { it.lower < it.upper && it.upper == fps }
+        }.getOrNull()
         val t = HandlerThread("omnicam-slowmo").also { it.start() }
         thread = t
         handler = Handler(t.looper)
@@ -160,12 +192,16 @@ class HighSpeedRecorder(private val ctx: Context) {
                     d.close()
                     if (device === d) device = null
                     // Some Samsung firmwares drop a high-speed camera without any error: report it
-                    if (gen == generation) error("The camera was disconnected")
+                    if (gen == generation) error("The camera was disconnected", permanent = false)
                 }
                 override fun onError(d: CameraDevice, error: Int) {
                     d.close()
                     if (device === d) device = null
-                    if (gen == generation) error("Camera error $error")
+                    if (gen == generation) error(
+                        "Camera error $error",
+                        permanent = error == CameraDevice.StateCallback.ERROR_CAMERA_DEVICE ||
+                            error == CameraDevice.StateCallback.ERROR_CAMERA_SERVICE,
+                    )
                 }
                 override fun onClosed(d: CameraDevice) {
                     t.quitSafely()
@@ -175,7 +211,7 @@ class HighSpeedRecorder(private val ctx: Context) {
         } catch (e: Exception) {
             t.quitSafely()
             releaseCount()
-            error("Could not open the camera: ${e.message}")
+            error("Could not open the camera: ${e.message}", permanent = false)
         }
     }
 
@@ -222,26 +258,49 @@ class HighSpeedRecorder(private val ctx: Context) {
         }
     }
 
-    /** Repeating high-speed burst: viewfinder only, or viewfinder + recorder while recording. */
-    private fun repeat(recording: Boolean) {
-        val d = device ?: return
-        val s = session ?: return
-        val prev = previewSurface ?: return
-        runCatching {
+    /**
+     * Repeating high-speed burst: viewfinder only, or viewfinder + recorder while recording. Returns
+     * false if the camera rejected it; with [report] the engine is told (temporary unless the request
+     * itself was rejected).
+     */
+    private fun repeat(recording: Boolean, report: Boolean = true): Boolean {
+        val d = device ?: return false
+        val s = session ?: return false
+        val prev = previewSurface ?: return false
+        // Framing runs at [30, fps] where the camera offers it; recording always at the full fixed rate
+        val range = if (recording) Range(fps, fps) else (previewRange ?: Range(fps, fps))
+        return try {
             val b = d.createCaptureRequest(if (recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
             b.addTarget(prev)
             if (recording) recorderSurface?.let { b.addTarget(it) }
-            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
             b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), frameCounter, handler)
-        }.onFailure { error("Slow-motion preview failed: ${it.message}") }
+            previewRunning = !recording
+            true
+        } catch (e: IllegalArgumentException) {
+            if (!recording && range != Range(fps, fps)) {
+                // This camera does not take the variable preview rate after all: use the fixed one
+                previewRange = null
+                return repeat(recording, report)
+            }
+            if (report) error("Slow-motion request rejected: ${e.message}", permanent = true)
+            false
+        } catch (e: Exception) {
+            // Camera taken by another app or session closing: temporary
+            if (report) error("Slow-motion preview interrupted: ${e.message}", permanent = false)
+            false
+        }
     }
 
     /** A MediaRecorder writing to a new pending file in DCIM/OmniCam. */
     private fun prepareRecorder(): Boolean {
         val sz = size ?: return false
-        val (uri, fd) = MediaOutput.newPendingVideo(ctx, MediaOutput.stamp(), "SLOMO") ?: return false
+        val (uri, fd) = MediaOutput.newPendingVideo(ctx, MediaOutput.stamp(), "SLOMO") ?: run {
+            noStorage = true
+            return false
+        }
         pendingUri = uri
         pendingFd = fd
         val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(ctx) else @Suppress("DEPRECATION") MediaRecorder()
@@ -250,6 +309,14 @@ class HighSpeedRecorder(private val ctx: Context) {
             r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             r.setOutputFile(fd.fileDescriptor)
             r.setVideoEncodingBitRate(bitrateFor(sz))
+            // The encoder runs at the full capture rate in real time: report a failure as it happens,
+            // not only at stop. The MP4 size limit (4 GB) ends the take cleanly instead of silently.
+            r.setOnErrorListener { _, _, _ -> mainHandler.post { onTakeInterrupted("encoder error") } }
+            r.setOnInfoListener { _, what, _ ->
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
+                    what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
+                ) mainHandler.post { onTakeInterrupted("file size limit reached") }
+            }
             if (compatRecorder) {
                 r.setVideoFrameRate(fps)
                 r.setCaptureRate(fps.toDouble())
@@ -260,7 +327,10 @@ class HighSpeedRecorder(private val ctx: Context) {
             }
             r.setVideoSize(sz.width, sz.height)
             r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            r.setOrientationHint(orientationHint)
+            val rot = deviceRotationDegrees
+            r.setOrientationHint(
+                if (frontFacing) (sensorOrientation + rot) % 360 else (sensorOrientation - rot + 360) % 360
+            )
             r.prepare()
             recorder = r
             recorderSurface = r.surface
@@ -272,10 +342,42 @@ class HighSpeedRecorder(private val ctx: Context) {
         }
     }
 
-    private fun bitrateFor(s: Size): Int = when {
-        s.height >= 1080 || s.width >= 1920 -> 30_000_000
-        s.height >= 720 || s.width >= 1280 -> 16_000_000
-        else -> 8_000_000
+    private var noStorage = false
+
+    /**
+     * Bitrate of the slowed-down file. The encoder receives every captured frame in real time
+     * (e.g. 240 per second), so its real load is this value × fps / 30. The phone maker's own
+     * high-speed profile tells what its encoder handles in real time; scale that to 30 fps playback.
+     * Otherwise use 20 Mbps at most, as in Google's official sample.
+     */
+    private fun bitrateFor(s: Size): Int {
+        val cap = when {
+            s.height >= 1080 || s.width >= 1920 -> 20_000_000
+            s.height >= 720 || s.width >= 1280 -> 16_000_000
+            else -> 8_000_000
+        }
+        if (compatRecorder) return cap
+        val rt = realTimeProfileBitrate(s) ?: return cap
+        return (rt.toLong() * 30 / fps.coerceAtLeast(30)).toInt().coerceIn(6_000_000, cap)
+    }
+
+    private fun realTimeProfileBitrate(s: Size): Int? {
+        val id = cameraId ?: return null
+        val q = when {
+            s.height >= 2160 -> CamcorderProfile.QUALITY_HIGH_SPEED_2160P
+            s.height >= 1080 -> CamcorderProfile.QUALITY_HIGH_SPEED_1080P
+            s.height >= 720 -> CamcorderProfile.QUALITY_HIGH_SPEED_720P
+            else -> CamcorderProfile.QUALITY_HIGH_SPEED_480P
+        }
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= 31) {
+                CamcorderProfile.getAll(id, q)?.videoProfiles?.firstOrNull()?.bitrate
+            } else {
+                val n = id.toIntOrNull() ?: return@runCatching null
+                @Suppress("DEPRECATION")
+                if (CamcorderProfile.hasProfile(n, q)) CamcorderProfile.get(n, q).videoBitRate else null
+            }
+        }.getOrNull()?.takeIf { it > 0 }
     }
 
     private fun discardPending() {
@@ -287,10 +389,11 @@ class HighSpeedRecorder(private val ctx: Context) {
 
     /**
      * Starts recording (asynchronously: a new session is configured first). [onResult] gets null on
-     * success, otherwise the step that failed: "camera", "encoder", "session" or "start".
+     * success, otherwise the step that failed: "camera", "storage", "encoder", "session" or "start".
      */
     fun startRecording(onResult: (String?) -> Unit) {
         val h = handler ?: return onResult("camera")
+        previewRunning = false
         val gen = generation
         // Everything that touches the recorder holds the same lock as close(): MediaRecorder is not
         // thread-safe, and close() can run on the main thread while a start is in progress here.
@@ -300,8 +403,11 @@ class HighSpeedRecorder(private val ctx: Context) {
                 mainHandler.post { onResult("camera") }
                 return@post
             }
+            noStorage = false
             if (!prepareRecorder()) {
-                mainHandler.post { onResult("encoder") }   // the preview session is untouched
+                previewRunning = session != null   // the preview session is untouched
+                val step = if (noStorage) "storage" else "encoder"
+                mainHandler.post { onResult(step) }
                 return@post
             }
             runCatching { session?.stopRepeating() }
@@ -325,8 +431,17 @@ class HighSpeedRecorder(private val ctx: Context) {
                     mainHandler.post { onResult("session") }
                     return@createSession
                 }
-                repeat(recording = true)
+                // The recorder must not start when the camera rejected the recording request
+                if (!repeat(recording = true, report = false)) {
+                    releaseRecorder(discard = true)
+                    restartPreview(gen)
+                    mainHandler.post { onResult("session") }
+                    return@createSession
+                }
+                recordFrames = 0
+                countingTake = true
                 val started = runCatching { recorder?.start() }.isSuccess
+                if (!started) countingTake = false
                 if (started) isRecording = true
                 else { releaseRecorder(discard = true); restartPreview(gen) }
                 mainHandler.post { onResult(if (started) null else "start") }
@@ -337,6 +452,7 @@ class HighSpeedRecorder(private val ctx: Context) {
 
     /** Stops and finalizes the file, then restarts the preview. [onResult] gets the saved video or null. */
     fun stopRecording(onResult: (Uri?) -> Unit) {
+        previewRunning = false
         val h = handler ?: return onResult(finishTake())
         val gen = generation
         val posted = h.post {
@@ -349,6 +465,7 @@ class HighSpeedRecorder(private val ctx: Context) {
 
     /** Stops the recorder and closes the recording session. Returns the saved video, or null. */
     @Synchronized private fun finishTake(): Uri? {
+        countingTake = false
         val r = recorder ?: return null
         val uri = pendingUri
         runCatching { session?.stopRepeating() }
@@ -388,6 +505,7 @@ class HighSpeedRecorder(private val ctx: Context) {
     /** Releases the camera. Use [whenClosed] to know when CameraX may open it again. */
     @Synchronized fun close(): Uri? {
         generation++   // callbacks of the previous open request are now ignored
+        previewRunning = false
         val saved = if (isRecording) runCatching { finishTake() }.getOrNull() else null
         runCatching { session?.close() }
         session = null

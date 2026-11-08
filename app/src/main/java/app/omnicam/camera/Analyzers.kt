@@ -30,6 +30,8 @@ class ScopeAnalyzer(private val onFrame: (ScopeFrame) -> Unit) : ImageAnalysis.A
     @Volatile var histogram = true
     @Volatile var zebra = false
     @Volatile var peaking = false
+    /** Kamera depan: PreviewView menampilkan bayangan cermin, jadi overlay ikut dicerminkan. */
+    @Volatile var mirror = false
 
     private var lastEmit = 0L
 
@@ -58,6 +60,7 @@ class ScopeAnalyzer(private val onFrame: (ScopeFrame) -> Unit) : ImageAnalysis.A
             val pixels = if (wantOverlay) IntArray(outW * outH) else null
             val doZebra = zebra
             val doPeak = peaking
+            val doMirror = mirror
 
             for (cy in 0 until rows) {
                 val y = cy * STEP
@@ -83,7 +86,8 @@ class ScopeAnalyzer(private val onFrame: (ScopeFrame) -> Unit) : ImageAnalysis.A
                             270 -> { dx = cy; dy = cols - 1 - cx }
                             else -> { dx = cx; dy = cy }
                         }
-                        pixels[dy * outW + dx] = color
+                        val fx = if (doMirror) outW - 1 - dx else dx
+                        pixels[dy * outW + fx] = color
                     }
                 }
             }
@@ -114,6 +118,8 @@ class QrAnalyzer(private val onResult: (text: String, format: String) -> Unit) :
         setHints(
             mapOf(
                 DecodeHintType.TRY_HARDER to true,
+                // White-on-black codes (dark-mode screens) scan too (GrapheneOS and Aperture do this)
+                DecodeHintType.ALSO_INVERTED to true,
                 DecodeHintType.POSSIBLE_FORMATS to listOf(
                     BarcodeFormat.QR_CODE, BarcodeFormat.DATA_MATRIX, BarcodeFormat.AZTEC,
                     BarcodeFormat.PDF_417, BarcodeFormat.EAN_13, BarcodeFormat.EAN_8,
@@ -122,10 +128,15 @@ class QrAnalyzer(private val onResult: (text: String, format: String) -> Unit) :
             )
         )
     }
+    /** True while a result card is shown: no decoding work under it. */
+    @Volatile var paused = false
     private var data = ByteArray(0)
+    private var rotated = ByteArray(0)
+    private var flip = false
 
     override fun analyze(image: ImageProxy) {
         try {
+            if (paused) return
             val plane = image.planes[0]
             val buf = plane.buffer
             val w = image.width
@@ -136,7 +147,22 @@ class QrAnalyzer(private val onResult: (text: String, format: String) -> Unit) :
                 buf.position(row * rs)
                 buf.get(data, row * w, w)
             }
-            val source = PlanarYUVLuminanceSource(data, w, h, 0, 0, w, h, false)
+            // Barcode 1D (EAN/UPC/Code128) hanya dibaca ZXing sepanjang baris gambar. Buffer sensor
+            // berorientasi landscape, jadi barcode yang tegak lurus di layar portrait tidak pernah
+            // terbaca. Frame berselang dicoba dalam versi yang diputar 90°.
+            val sideways = image.imageInfo.rotationDegrees.let { it == 90 || it == 270 }
+            flip = sideways && !flip
+            val source = if (flip) {
+                if (rotated.size != data.size) rotated = ByteArray(data.size)
+                for (y in 0 until h) {
+                    val o = y * w
+                    val col = h - 1 - y
+                    for (x in 0 until w) rotated[x * h + col] = data[o + x]
+                }
+                PlanarYUVLuminanceSource(rotated, h, w, 0, 0, h, w, false)
+            } else {
+                PlanarYUVLuminanceSource(data, w, h, 0, 0, w, h, false)
+            }
             val result = reader.decodeWithState(BinaryBitmap(HybridBinarizer(source)))
             onResult(result.text, result.barcodeFormat.name)
         } catch (_: NotFoundException) {
