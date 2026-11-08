@@ -159,7 +159,7 @@ fun ProPanel(ui: CamUi, readout: Readout, engine: CameraEngine) {
                 }
             }
             ProSection.FILE -> {
-                ChipRow { ui.formats.forEach { f -> Chip(f.label, ui.format == f) { engine.setFormat(f) } } }
+                ChipRow { ui.formats.forEach { f -> Chip(f.label, ui.format == f, enabled = !ui.busy) { engine.setFormat(f) } } }
             }
             ProSection.TOOLS -> {
                 ChipRow {

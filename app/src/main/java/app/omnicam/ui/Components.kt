@@ -13,6 +13,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -55,8 +59,10 @@ fun OmniTheme(content: @Composable () -> Unit) {
             surface = Color(0xFF0E0E0E),
             onSurface = Color.White,
         ),
-        content = content,
-    )
+    ) {
+        // Text without an explicit color (e.g. screen titles) is white, not black-on-black
+        CompositionLocalProvider(LocalContentColor provides Color.White, content = content)
+    }
 }
 
 @Composable
@@ -66,6 +72,8 @@ fun Chip(
     enabled: Boolean = true,
     compact: Boolean = false,
     dot: Boolean = false,
+    /** Spoken by TalkBack instead of [text], for symbol-only chips. */
+    description: String? = null,
     onClick: () -> Unit,
 ) {
     // Nothing-style pills: selected = solid white with black text, otherwise a thin outline
@@ -83,6 +91,7 @@ fun Chip(
             .clip(RoundedCornerShape(50))
             .background(bg)
             .border(1.dp, if (selected) Color.White else Color(0x40FFFFFF), RoundedCornerShape(50))
+            .let { m -> if (description != null) m.semantics { contentDescription = description } else m }
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = if (compact) 10.dp else 12.dp, vertical = if (compact) 6.dp else 7.dp),
     )

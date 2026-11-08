@@ -20,6 +20,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -61,7 +63,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import app.omnicam.findActivity
+import app.omnicam.recordPermissionResult
+import app.omnicam.requestOrOpenSettings
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -88,7 +98,13 @@ private fun Context.has(perm: String) =
     ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
 
 @Composable
-fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
+fun CameraScreen(
+    engine: CameraEngine,
+    prefs: Prefs,
+    /** Another app asked for one photo or one video: only that mode is offered. */
+    lockedMode: Mode? = null,
+    onInfoShown: (Boolean) -> Unit = {},
+) {
     val ctx = LocalContext.current
     val owner = LocalLifecycleOwner.current
     val ui by engine.ui.collectAsState()
@@ -104,10 +120,13 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     // since before that the full preview is more useful for lining up the shot.
     val whiteLightMode = screenLightOn && ui.recording
     ScreenBrightnessBoost(active = screenFlashActive || screenLightOn)
-    // Keep the screen on while recording: a long time-lapse must not be cut off by the screen timeout
+    // Keep the screen on while recording (a long time-lapse must not be cut off by the screen timeout),
+    // and while framing a shot, like stock cameras: it may sleep after 2 minutes without any activity.
     val hostView = LocalView.current
-    DisposableEffect(ui.recording) {
-        hostView.keepScreenOn = ui.recording
+    var idle by remember { mutableStateOf(false) }
+    LaunchedEffect(ui) { idle = false; delay(120_000); idle = true }
+    DisposableEffect(ui.recording, idle) {
+        hostView.keepScreenOn = ui.recording || !idle
         onDispose { hostView.keepScreenOn = false }
     }
     val settings by prefs.settings.collectAsState()
@@ -123,6 +142,10 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     val evDragPx = with(LocalDensity.current) { 320.dp.toPx() }
     var evCarry by remember { mutableFloatStateOf(0f) }
     var showInfo by remember { mutableStateOf(false) }
+    LaunchedEffect(showInfo) { onInfoShown(showInfo) }
+    // True from the moment a second finger touches until all fingers lift: the finger left after a
+    // pinch must not start changing the brightness.
+    var multiTouch by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
 
     val previewView = remember {
@@ -136,11 +159,15 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
         }
     }
 
+    val activity = remember(ctx) { ctx.findActivity() }
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        activity?.recordPermissionResult(Manifest.permission.RECORD_AUDIO, ok)
         engine.setMic(ok)
     }
     val locLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
-        prefs.update { it.copy(geotag = res.values.any { granted -> granted }) }
+        val ok = res.values.any { granted -> granted }
+        activity?.recordPermissionResult(Manifest.permission.ACCESS_FINE_LOCATION, ok)
+        prefs.update { it.copy(geotag = ok) }
     }
 
     LaunchedEffect(Unit) {
@@ -157,6 +184,10 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
     }
 
     BackHandler(enabled = showInfo) { showInfo = false }
+    // Back while recording stops (and saves) the recording instead of leaving the app mid-take
+    // (Not for another app's one-off request: there Back means cancel, not "send this clip".)
+    BackHandler(enabled = ui.recording && !showInfo && lockedMode == null) { engine.onShutter() }
+    BackHandler(enabled = ui.qr != null && !showInfo) { engine.clearQr() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
 
@@ -171,9 +202,23 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                     detectTapGestures(onTap = { engine.focusAt(it.x, it.y); evTouch = System.nanoTime() })
                 }
                 .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        multiTouch = false
+                        do {
+                            val e = awaitPointerEvent(PointerEventPass.Initial)
+                            if (e.changes.count { it.pressed } > 1) multiTouch = true
+                        } while (e.changes.any { it.pressed })
+                    }
+                }
+                .pointerInput(Unit) {
                     // Pinch = zoom. One-finger slide up/down after a tap = brightness (like the iPhone camera)
                     detectTransformGestures { _, pan, zoom, _ ->
-                        if (zoom != 1f) { engine.zoomBy(zoom); evCarry = 0f; return@detectTransformGestures }
+                        if (zoom != 1f || multiTouch) {
+                            if (zoom != 1f) engine.zoomBy(zoom)
+                            evCarry = 0f
+                            return@detectTransformGestures
+                        }
                         val u = engine.ui.value   // live value: several slide events arrive between frames
                         val r = u.ranges ?: return@detectTransformGestures
                         val evOk = u.mode == Mode.PHOTO || u.mode.isVideo
@@ -250,7 +295,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
 
         // ───── Bar atas ─────
         TopBar(ui, engine, settings.grid.label, onSettings = { showSettings = true }, onInfo = { showInfo = true },
-            modifier = Modifier.align(Alignment.TopCenter), onWhite = whiteLightMode)
+            modifier = Modifier.align(Alignment.TopCenter), onWhite = whiteLightMode, single = lockedMode != null)
 
         // ───── Kartu hasil QR ─────
         ui.qr?.let { hit ->
@@ -272,8 +317,10 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 when (ui.mode) {
                     Mode.PHOTO -> ExtensionRow(ui, engine)
                     Mode.VIDEO -> VideoPanel(ui, engine) { on ->
-                        if (on && !ctx.has(Manifest.permission.RECORD_AUDIO)) micLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        else engine.setMic(on)
+                        if (on && !ctx.has(Manifest.permission.RECORD_AUDIO)) {
+                            val launch = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+                            activity?.requestOrOpenSettings(Manifest.permission.RECORD_AUDIO, launch) ?: launch()
+                        } else engine.setMic(on)
                     }
                     Mode.SLOWMO -> SlowMoPanel(ui, engine)
                     Mode.TIMELAPSE -> TimelapsePanel(ui)
@@ -291,18 +338,23 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                LastThumb(ui.lastUri) { ui.lastUri?.let { openUri(ctx, it) } }
+                // Opening the gallery sends OmniCam to the background, which would end a recording
+                val thumb = ui.lastUri ?: ui.thumbUri
+                LastThumb(thumb, enabled = !ui.recording && !ui.busy && lockedMode == null) {
+                    thumb?.let { openUri(ctx, it) }
+                }
                 ShutterButton(ui, engine)
                 Box(
                     Modifier.size(52.dp).clip(CircleShape).background(Color(0x33FFFFFF))
-                        .clickable(enabled = !ui.recording) { engine.flip() },
+                        .semantics { contentDescription = "Switch camera"; role = Role.Button }
+                        .clickable(enabled = !ui.recording && !ui.busy) { engine.flip() },
                     contentAlignment = Alignment.Center,
-                ) { Text("⟲", color = Color.White, fontSize = 24.sp) }
+                ) { Text("⟲", color = if (ui.recording || ui.busy) Color.White.copy(alpha = 0.4f) else Color.White, fontSize = 24.sp) }
             }
 
             // Mode picker: spreads evenly when the tabs fit, and scrolls sideways (keeping the active mode
             // in view) on narrow screens or with large display/font sizes, so no mode is ever cut off.
-            val modes = Mode.entries.filter {
+            val modes = if (lockedMode != null) listOf(lockedMode) else Mode.entries.filter {
                 it != Mode.SLOWMO || ui.slowMoOk || ui.mode == Mode.SLOWMO
             }
             val modeScroll = rememberScrollState()
@@ -321,7 +373,7 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 modes.forEach { m ->
                     val on = ui.mode == m
                     Column(
-                        Modifier.clickable(enabled = !ui.recording) { engine.setMode(m) }
+                        Modifier.clickable(enabled = !ui.recording && !ui.busy) { engine.setMode(m) }
                             .padding(horizontal = 10.dp, vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
@@ -363,7 +415,12 @@ fun CameraScreen(engine: CameraEngine, prefs: Prefs) {
                 if (!on) prefs.update { it.copy(geotag = false) }
                 else if (ctx.has(Manifest.permission.ACCESS_FINE_LOCATION) || ctx.has(Manifest.permission.ACCESS_COARSE_LOCATION)) {
                     prefs.update { it.copy(geotag = true) }
-                } else locLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                } else {
+                    val launch = {
+                        locLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                    }
+                    activity?.requestOrOpenSettings(Manifest.permission.ACCESS_FINE_LOCATION, launch) ?: launch()
+                }
             },
             onInfo = { showSettings = false; showInfo = true },
         )
@@ -382,6 +439,8 @@ private fun TopBar(
     onInfo: () -> Unit,
     modifier: Modifier,
     onWhite: Boolean = false,
+    /** Another app asked for one photo: no burst (the result goes back after the first shot). */
+    single: Boolean = false,
 ) {
     Row(
         modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)
@@ -407,7 +466,9 @@ private fun TopBar(
                 }
             }
             Chip(if (ui.timer == 0) "⏱ Off" else "⏱ ${ui.timer}s", ui.timer != 0, compact = true) { engine.cycleTimer() }
-            Chip(if (ui.burst == 1) "Burst 1" else "Burst ${ui.burst}", ui.burst != 1, compact = true) { engine.cycleBurst() }
+            if (!single) {
+                Chip(if (ui.burst == 1) "Burst 1" else "Burst ${ui.burst}", ui.burst != 1, compact = true) { engine.cycleBurst() }
+            }
         } else if (ui.hasFlash) {
             Chip(if (ui.torch) "🔦 On" else "🔦 Off", ui.torch, compact = true) { engine.toggleTorch() }
         } else if (ui.front && ui.mode.isVideo) {
@@ -415,8 +476,8 @@ private fun TopBar(
             Chip(if (ui.torch) "💡 Light: On" else "💡 Light: Off", ui.torch, compact = true) { engine.toggleTorch() }
         }
         // Grid lives in Settings; the top bar keeps only quick toggles so it fits narrow screens
-        Chip("⚙", false, compact = true, onClick = onSettings)
-        Chip("ⓘ", false, compact = true, onClick = onInfo)
+        Chip("⚙", false, compact = true, description = "Settings", onClick = onSettings)
+        Chip("ⓘ", false, compact = true, description = "Camera info", onClick = onInfo)
     }
 }
 
@@ -436,7 +497,9 @@ private fun LensRow(ui: CamUi, engine: CameraEngine) {
         }
         if (lenses.size > 1) {
             Text("│", color = Color.Gray)
-            lenses.forEach { l -> Chip(l.label, ui.lensId == l.id, dot = true) { engine.selectLens(l.id) } }
+            lenses.forEach { l ->
+                Chip(l.label, ui.lensId == l.id, enabled = !ui.recording && !ui.busy, dot = true) { engine.selectLens(l.id) }
+            }
         }
     }
 }
@@ -457,7 +520,9 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
         // Pause/resume is not available for high-speed (slow-motion) recording
         if (ui.recording && ui.mode != Mode.TIMELAPSE && !(ui.mode == Mode.SLOWMO && ui.slowMo.camera2)) {
             Box(
-                Modifier.size(44.dp).clip(CircleShape).background(Color(0x33FFFFFF)).clickable { engine.pauseResume() },
+                Modifier.size(44.dp).clip(CircleShape).background(Color(0x33FFFFFF))
+                    .semantics { contentDescription = if (ui.paused) "Resume" else "Pause"; role = Role.Button }
+                    .clickable { engine.pauseResume() },
                 contentAlignment = Alignment.Center,
             ) { Text(if (ui.paused) "▶" else "⏸", color = Color.White, fontSize = 18.sp) }
         }
@@ -468,6 +533,14 @@ private fun ShutterButton(ui: CamUi, engine: CameraEngine) {
                 .padding(8.dp)
                 .clip(shape)
                 .background(inner)
+                .semantics {
+                    contentDescription = when {
+                        ui.recording -> "Stop recording"
+                        ui.mode.isVideo -> "Start recording"
+                        else -> "Take photo"
+                    }
+                    role = Role.Button
+                }
                 .clickable { engine.onShutter() },
         )
     }
@@ -518,7 +591,7 @@ private fun FocusBox(ui: CamUi, active: Boolean) {
 }
 
 @Composable
-private fun LastThumb(uri: Uri?, onClick: () -> Unit) {
+private fun LastThumb(uri: Uri?, enabled: Boolean, onClick: () -> Unit) {
     val ctx = LocalContext.current
     var bmp by remember(uri) { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(uri) {
@@ -530,7 +603,8 @@ private fun LastThumb(uri: Uri?, onClick: () -> Unit) {
     }
     Box(
         Modifier.size(52.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x33FFFFFF))
-            .clickable(enabled = uri != null, onClick = onClick),
+            .semantics { contentDescription = "Open last photo or video" }
+            .clickable(enabled = uri != null && enabled, onClick = onClick),
     ) {
         bmp?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
     }
@@ -563,12 +637,15 @@ private fun QrCard(text: String, format: String, engine: CameraEngine, modifier:
 }
 
 private fun openUri(ctx: Context, uri: Uri) {
-    runCatching {
-        ctx.startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, ctx.contentResolver.getType(uri) ?: "image/*")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+    // ACTION_REVIEW lets the gallery swipe through the other photos too (as in Aperture); not every
+    // gallery supports it, so fall back to plain ACTION_VIEW
+    val type = ctx.contentResolver.getType(uri) ?: "image/*"
+    val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+    val review = runCatching {
+        ctx.startActivity(Intent(android.provider.MediaStore.ACTION_REVIEW).setDataAndType(uri, type).addFlags(flags))
+    }
+    if (review.isFailure) runCatching {
+        ctx.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, type).addFlags(flags))
     }
 }
 

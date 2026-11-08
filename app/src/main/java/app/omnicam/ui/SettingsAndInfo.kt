@@ -124,7 +124,7 @@ fun InfoScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().background(Color(0xFF0B0F14)).pointerInput(Unit) { detectTapGestures { } }.statusBarsPadding().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Chip("← Back", onClick = onBack)
-            Text("Camera info", fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp))
+            Text("Camera info", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp))
             reports?.let { rl ->
                 Box(Modifier.weight(1f))
                 Chip("Copy report") {
