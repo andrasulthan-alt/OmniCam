@@ -115,6 +115,54 @@ object MediaOutput {
             .build()
     }
 
+    /**
+     * Removes OmniCam's own unfinished (pending) files older than an hour: left behind when the app was
+     * killed during a slow-motion or time-lapse take, they would otherwise stay hidden for a week.
+     */
+    fun deleteStalePending(ctx: Context) {
+        val cutoff = System.currentTimeMillis() / 1000 - 3600
+        val args = android.os.Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_ONLY)
+            putString(
+                android.content.ContentResolver.QUERY_ARG_SQL_SELECTION,
+                "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME}=? AND ${MediaStore.MediaColumns.DATE_ADDED}<?",
+            )
+            putStringArray(
+                android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                arrayOf(ctx.packageName, cutoff.toString()),
+            )
+        }
+        listOf(
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+        ).forEach { col ->
+            runCatching {
+                ctx.contentResolver.query(col, arrayOf(android.provider.BaseColumns._ID), args, null)?.use { c ->
+                    while (c.moveToNext()) {
+                        runCatching { ctx.contentResolver.delete(android.content.ContentUris.withAppendedId(col, c.getLong(0)), null, null) }
+                    }
+                }
+            }
+        }
+    }
+
+    /** OmniCam's newest saved photo or video (no permission needed: apps always see their own files). */
+    fun latestOwn(ctx: Context): Uri? {
+        val sel = "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME}=? AND ${MediaStore.MediaColumns.MIME_TYPE} NOT LIKE ?"
+        val args = arrayOf(ctx.packageName, "%dng%")
+        fun newest(collection: Uri): Pair<Uri, Long>? = ctx.contentResolver.query(
+            collection,
+            arrayOf(android.provider.BaseColumns._ID, MediaStore.MediaColumns.DATE_ADDED),
+            sel, args, "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+        )?.use { c ->
+            if (!c.moveToFirst()) null
+            else android.content.ContentUris.withAppendedId(collection, c.getLong(0)) to c.getLong(1)
+        }
+        val img = runCatching { newest(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)) }.getOrNull()
+        val vid = runCatching { newest(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)) }.getOrNull()
+        return listOfNotNull(img, vid).maxByOrNull { it.second }?.first
+    }
+
     /** A new, still-hidden (pending) video entry in DCIM/OmniCam plus a writable descriptor for it. */
     fun newPendingVideo(ctx: Context, stamp: String, suffix: String): Pair<Uri, ParcelFileDescriptor>? {
         val cr = ctx.contentResolver
@@ -187,13 +235,15 @@ object MediaOutput {
      * Hapus lokasi GPS dan identitas perangkat dari JPEG biasa.
      * Tidak dijalankan untuk Ultra HDR (menulis ulang EXIF berisiko merusak gain map/MPF).
      */
-    fun scrub(ctx: Context, uri: Uri) {
-        val tags = listOf(
+    fun scrub(ctx: Context, uri: Uri, keepGps: Boolean = false) {
+        val gps = if (keepGps) emptyList() else listOf(
             ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF,
             ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF,
             ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF,
             ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP,
             ExifInterface.TAG_GPS_PROCESSING_METHOD,
+        )
+        val tags = gps + listOf(
             ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_SOFTWARE,
             ExifInterface.TAG_LENS_MAKE, ExifInterface.TAG_LENS_MODEL,
             ExifInterface.TAG_BODY_SERIAL_NUMBER, ExifInterface.TAG_LENS_SERIAL_NUMBER,
